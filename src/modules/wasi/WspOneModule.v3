@@ -121,11 +121,11 @@ class WspOneModule extends HostModule("wasi_snapshot_preview1") {
 	// Copy the argument pointers into {argv} and the null-terminated strings into {argvbuf}.
 	def args_get(args: Range<Value>) -> HostResult {
 		var argv = getRegion(memory, args[0], u32.view(cmdline_args.length) * 4);
-		if (argv < 0) return i(wasi_errno.INVAL.code);
+		if (argv < 0) return i(WspOneErrno.INVAL.code);
 		var size = 0u;
 		for (a in cmdline_args) size += (1u + u32.view(a.length));
 		var argbuf = getRegion(memory, args[1], size);
-		if (argbuf < 0) return i(wasi_errno.INVAL.code);
+		if (argbuf < 0) return i(WspOneErrno.INVAL.code);
 		for (i < cmdline_args.length) {
 			// write a pointer to a null-terminated string into a argv buffer
 			memory.write_u32(u32.view(argv), 0, u32.view(argbuf));
@@ -137,28 +137,28 @@ class WspOneModule extends HostModule("wasi_snapshot_preview1") {
 			memory.write_u8(u32.view(argbuf), 0, 0);
 			argbuf++;
 		}
-		return i(wasi_errno.SUCCESS.code);
+		return i(WspOneErrno.SUCCESS.code);
 	}
 	// Copy the number of arguments into {numptr} and the total size into {sizeptr}.
 	def args_sizes_get(args: Range<Value>) -> HostResult {
 		var argptr = getRegion(memory, args[0], 4);
-		if (argptr < 0) return i(wasi_errno.INVAL.code);
+		if (argptr < 0) return i(WspOneErrno.INVAL.code);
 		var size = 0;
 		for (a in cmdline_args) size += (1 + a.length);
 		var bufptr = getRegion(memory, args[1], 4);
-		if (bufptr < 0) return i(wasi_errno.INVAL.code);
+		if (bufptr < 0) return i(WspOneErrno.INVAL.code);
 		memory.write_u32(u32.view(argptr), 0, u32.view(cmdline_args.length));
 		memory.write_u32(u32.view(bufptr), 0, u32.view(size));
-		return i(wasi_errno.SUCCESS.code);
+		return i(WspOneErrno.SUCCESS.code);
 	}
 	def environ_get(args: Range<Value>) -> HostResult {
 		def envs = WasiOptions.getEnvs();
 		var environ = getRegion(memory, args[0], u32.view(envs.length) * 4);
-		if (environ < 0) return i(wasi_errno.INVAL.code);
+		if (environ < 0) return i(WspOneErrno.INVAL.code);
 		var size = 0u;
 		for (i < envs.length) size += (1u + u32.view(envs[i].length));
 		var environ_buf = getRegion(memory, args[1], size);
-		if (environ_buf < 0) return i(wasi_errno.INVAL.code);
+		if (environ_buf < 0) return i(WspOneErrno.INVAL.code);
 		for (i < envs.length) {
 			// write a pointer to a null-terminated string into an environ buffer
 			memory.write_u32(u32.view(environ), 0, u32.view(environ_buf));
@@ -171,30 +171,30 @@ class WspOneModule extends HostModule("wasi_snapshot_preview1") {
 			environ_buf++;
 		}
 
-		return i(wasi_errno.SUCCESS.code);
+		return i(WspOneErrno.SUCCESS.code);
 	 }
 	// Copy the number of environment variables into {numptr} ant the total size into {sizeptr}
 	def environ_sizes_get(args: Range<Value>) -> HostResult {
 		def envs = WasiOptions.getEnvs();
 		var argptr = getRegion(memory, args[0], 4);
-		if (argptr < 0) return i(wasi_errno.INVAL.code);
+		if (argptr < 0) return i(WspOneErrno.INVAL.code);
 		var size = 0;
 		for (i < envs.length) size += (1 + envs[i].length);
 		var bufptr = getRegion(memory, args[1], 4);
-		if (bufptr < 0) return i(wasi_errno.INVAL.code);
+		if (bufptr < 0) return i(WspOneErrno.INVAL.code);
 		memory.write_u32(u32.view(argptr), 0, u32.view(envs.length));
 		memory.write_u32(u32.view(bufptr), 0, u32.view(size));
 
-		return i(wasi_errno.SUCCESS.code);
+		return i(WspOneErrno.SUCCESS.code);
 	 }
 	def fd_advise(args: Range<Value>) -> HostResult { return UNIMPLEMENTED; }
 	def fd_allocate(args: Range<Value>) -> HostResult { return UNIMPLEMENTED; }
 	def fd_close(args: Range<Value>) -> HostResult {
-		var fd = Values.v_i(args[0]);
+		var fd = Values.unbox_i(args[0]);
 		var wfd = fdmap.get(fd);
 		if (wfd != null) System.fileClose(wfd.sysfd);
 		var r = fdmap.free(fd);
-		return i(if(r >= 0, 0, wasi_errno.INVAL.code));
+		return i(if(r >= 0, 0, WspOneErrno.INVAL.code));
 	}
 	def fd_datasync(args: Range<Value>) -> HostResult { return UNIMPLEMENTED; }
 	def fd_fdstat_get(args: Range<Value>) -> HostResult { return i(0); }
@@ -206,60 +206,60 @@ class WspOneModule extends HostModule("wasi_snapshot_preview1") {
 	def fd_pread(args: Range<Value>) -> HostResult { return UNIMPLEMENTED; }
 	// fd_prestat_get(fd: int, buf_ptr: Pointer)
 	def fd_prestat_get(args: Range<Value>) -> HostResult {
-		def fd = Values.v_i(args[0]);
+		def fd = Values.unbox_i(args[0]);
 		def wfd = fdmap.get(fd);
-		if (wfd == null || !wfd.preopen) return i(wasi_errno.BADF.code);
+		if (wfd == null || !wfd.preopen) return i(WspOneErrno.BADF.code);
 		
 		def bufptr = getRegion(memory, args[1], 4);
-		if (bufptr < 0) return i(wasi_errno.INVAL.code);
+		if (bufptr < 0) return i(WspOneErrno.INVAL.code);
 		memory.write_u32(u32.view(bufptr), 0, u32.view(PreopenType.Dir.code));
-		memory.write_u32(u32.view(bufptr), 4, u32.view(wfd.path.length + 1));
+		memory.write_u32(u32.view(bufptr), 4, u32.view(wfd.path.length));
 
-		return i(wasi_errno.SUCCESS.code);
+		return i(WspOneErrno.SUCCESS.code);
 	}
 	// fd_prestat_dir_name(fd: int, path_p: Pointer, path_len: u32)
 	def fd_prestat_dir_name(args: Range<Value>) -> HostResult {
-		def fd = Values.v_i(args[0]);
+		def fd = Values.unbox_i(args[0]);
 		def wfd = fdmap.get(fd);
-		if (wfd == null || !wfd.preopen) return i(wasi_errno.BADF.code);
+		if (wfd == null || !wfd.preopen) return i(WspOneErrno.BADF.code);
 
-		def path_len = Values.v_u(args[2]);
+		def path_len = Values.unbox_u(args[2]);
 		def pathptr = getRegion(memory, args[1], path_len);
-		if (pathptr < 0) return i(wasi_errno.INVAL.code);
+		if (pathptr < 0) return i(WspOneErrno.INVAL.code);
 
 		// write a directory name into a buffer
-		memory.copyIn(u32.view(pathptr), wfd.path, 0, path_len);
+		memory.copyIn(u32.view(pathptr), wfd.path, 0, u32.!(wfd.path.length));
 
-		return i(wasi_errno.SUCCESS.code);
+		return i(WspOneErrno.SUCCESS.code);
 	}
 	def fd_pwrite(args: Range<Value>) -> HostResult { return UNIMPLEMENTED; }
 	def fd_read(args: Range<Value>) -> HostResult {
-		var fd = Values.v_i(args[0]);
+		var fd = Values.unbox_i(args[0]);
 		var wfd = fdmap.get(fd);
-		if (wfd == null) return i(wasi_errno.BADF.code);
-		var iovs_ptr = Values.v_u(args[1]);
-		var iovs_len = Values.v_u(args[2]);
+		if (wfd == null) return i(WspOneErrno.BADF.code);
+		var iovs_ptr = Values.unbox_u(args[1]);
+		var iovs_len = Values.unbox_u(args[2]);
 		var iovbuf = getRegion2(memory, iovs_ptr, iovs_len * 8);
-		if (iovbuf < 0) return i(wasi_errno.INVAL.code); // Invalid memory
+		if (iovbuf < 0) return i(WspOneErrno.INVAL.code); // Invalid memory
 
-		var outsize_ptr = Values.v_u(args[3]);
+		var outsize_ptr = Values.unbox_u(args[3]);
 		var outsize_buf = getRegion2(memory, outsize_ptr, 4);
-		if (outsize_buf < 0) return i(wasi_errno.INVAL.code); // Invalid memory
+		if (outsize_buf < 0) return i(WspOneErrno.INVAL.code); // Invalid memory
 		
 		var total = 0;
 		for (j < iovs_len) {
 			var iov_ptr = memory.read_u32(0, u32.view(iovbuf)).result;
 			var iov_len = memory.read_u32(0, u32.view(iovbuf + 4)).result;
 			var iobuf = getRegion2(memory, iov_ptr, iov_len);
-			if (iobuf < 0) return i(wasi_errno.INVAL.code); // Invalid memory
+			if (iobuf < 0) return i(WspOneErrno.INVAL.code); // Invalid memory
 			var out = memory.readIn(wfd.sysfd, u32.view(iobuf), iov_len);
-			if (out < 0) return i(wasi_errno.IO.code);
+			if (out < 0) return i(WspOneErrno.IO.code);
 			total += out;
 			iovbuf += 8;
 		}
 
 		memory.write_u32(outsize_ptr, 0, u32.view(total));
-		return i(wasi_errno.SUCCESS.code);
+		return i(WspOneErrno.SUCCESS.code);
 	}
 	def fd_readdir(args: Range<Value>) -> HostResult { return UNIMPLEMENTED; }
 	def fd_renumber(args: Range<Value>) -> HostResult { return UNIMPLEMENTED; }
@@ -267,30 +267,30 @@ class WspOneModule extends HostModule("wasi_snapshot_preview1") {
 	def fd_sync(args: Range<Value>) -> HostResult { return UNIMPLEMENTED; }
 	def fd_tell(args: Range<Value>) -> HostResult { return UNIMPLEMENTED; }
 	def fd_write(args: Range<Value>) -> HostResult {
-		var fd = Values.v_i(args[0]);
+		var fd = Values.unbox_i(args[0]);
 		var wfd = fdmap.get(fd);
-		if (wfd == null) return i(wasi_errno.BADF.code);
-		var iovs_ptr = Values.v_u(args[1]);
-		var iovs_len = Values.v_u(args[2]);
+		if (wfd == null) return i(WspOneErrno.BADF.code);
+		var iovs_ptr = Values.unbox_u(args[1]);
+		var iovs_len = Values.unbox_u(args[2]);
 		var iovbuf = getRegion2(memory, iovs_ptr, iovs_len * 8);
-		if (iovbuf < 0) return i(wasi_errno.INVAL.code); // Invalid memory
-		var outsize_ptr = Values.v_u(args[3]);
+		if (iovbuf < 0) return i(WspOneErrno.INVAL.code); // Invalid memory
+		var outsize_ptr = Values.unbox_u(args[3]);
 		var outsize_buf = getRegion2(memory, outsize_ptr, 4);
-		if (outsize_buf < 0) return i(wasi_errno.INVAL.code);
+		if (outsize_buf < 0) return i(WspOneErrno.INVAL.code);
 
 		var total = 0;
 		for (j < iovs_len) {
 			var iov_ptr = memory.read_u32(0, u32.view(iovbuf)).result;
 			var iov_len = memory.read_u32(0, u32.view(iovbuf + 4)).result;
 			var iobuf = getRegion2(memory, iov_ptr, iov_len);
-			if (iobuf < 0) return i(wasi_errno.INVAL.code); // Invalid memory
+			if (iobuf < 0) return i(WspOneErrno.INVAL.code); // Invalid memory
 			var out = memory.writeOut(wfd.sysfd, u32.view(iobuf), iov_len);
-			if (out < 0) return i(wasi_errno.IO.code);
+			if (out < 0) return i(WspOneErrno.IO.code);
 			total += out;
 			iovbuf += 8;
 		}
 		memory.write_u32(u32.view(outsize_ptr), 0, u32.view(total));
-		return i(wasi_errno.SUCCESS.code);
+		return i(WspOneErrno.SUCCESS.code);
 	}
 	def path_create_directory(args: Range<Value>) -> HostResult { return UNIMPLEMENTED; }
 	def path_filestat_get(args: Range<Value>) -> HostResult { return UNIMPLEMENTED; }
@@ -306,7 +306,7 @@ class WspOneModule extends HostModule("wasi_snapshot_preview1") {
 	def clock_time_get(args: Range<Value>) -> HostResult { return UNIMPLEMENTED; }
 	def sched_yield(args: Range<Value>) -> HostResult { return UNIMPLEMENTED; }
 	def proc_exit(args: Range<Value>) -> HostResult {
-		return HostResult.Throw(Exit.new(Values.v_u(args[0])));
+		return HostResult.Throw(Exit.new(Values.unbox_u(args[0])));
 	}
 	def proc_raise(args: Range<Value>) -> HostResult { return UNIMPLEMENTED; }
 	def poll_oneoff(args: Range<Value>) -> HostResult { return UNIMPLEMENTED; }
@@ -335,7 +335,7 @@ component WspOneRegistration {
 	}
 }
 
-enum wasi_errno(code: u16, msg: string) {
+enum WspOneErrno(code: u16, msg: string) {
 	SUCCESS		(0, "No error occurred. System call completed successfully."),
 	TOO_BIG		(1, "Argument list too long."),
 	ACCES		(2, "Permission denied."),
@@ -424,4 +424,100 @@ enum wasi_filetype(code: byte) {
 	SOCKET_DGRAM		(5),
 	SOCKET_STREAM		(6),
 	SYMBOLIC_LINK		(7)
+}
+
+enum WspOneRights {
+	// The right to invoke `fd_datasync`.
+	//
+	// If `path_open` is set, includes the right to invoke
+	// `path_open` with `fdflags::dsync`.
+	fd_datasync,
+	// The right to invoke `fd_read` and `sock_recv`.
+	//
+	// If `rights::fd_seek` is set, includes the right to invoke `fd_pread`.
+	fd_read,
+	// The right to invoke `fd_seek`. This flag implies `rights::fd_tell`.
+	fd_seek,
+	// The right to invoke `fd_fdstat_set_flags`.
+	fd_fdstat_set_flags,
+	// The right to invoke `fd_sync`.
+	//
+	// If `path_open` is set, includes the right to invoke
+	// `path_open` with `fdflags::rsync` and `fdflags::dsync`.
+	fd_sync,
+	// The right to invoke `fd_seek` in such a way that the file offset
+	// remains unaltered (i.e., `whence::cur` with offset zero), or to
+	// invoke `fd_tell`.
+	fd_tell,
+	// The right to invoke `fd_write` and `sock_send`.
+	// If `rights::fd_seek` is set, includes the right to invoke `fd_pwrite`.
+	fd_write,
+	// The right to invoke `fd_advise`.
+	fd_advise,
+	// The right to invoke `fd_allocate`.
+	fd_allocate,
+	// The right to invoke `path_create_directory`.
+	path_create_directory,
+	// If `path_open` is set, the right to invoke `path_open` with `oflags::creat`.
+	path_create_file,
+	// The right to invoke `path_link` with the file descriptor as the
+	// source directory.
+	path_link_source,
+	// The right to invoke `path_link` with the file descriptor as the
+	// target directory.
+	path_link_target,
+	// The right to invoke `path_open`.
+	path_open,
+	// The right to invoke `fd_readdir`.
+	fd_readdir,
+	// The right to invoke `path_readlink`.
+	path_readlink,
+	// The right to invoke `path_rename` with the file descriptor as the source directory.
+	path_rename_source,
+	// The right to invoke `path_rename` with the file descriptor as the target directory.
+	path_rename_target,
+	// The right to invoke `path_filestat_get`.
+	path_filestat_get,
+	// The right to change a file's size (there is no `path_filestat_set_size`).
+	// If `path_open` is set, includes the right to invoke `path_open` with `oflags::trunc`.
+	path_filestat_set_size,
+	// The right to invoke `path_filestat_set_times`.
+	path_filestat_set_times,
+	// The right to invoke `fd_filestat_get`.
+	fd_filestat_get,
+	// The right to invoke `fd_filestat_set_size`.
+	fd_filestat_set_size,
+	// The right to invoke `fd_filestat_set_times`.
+	fd_filestat_set_times,
+	// The right to invoke `path_symlink`.
+	path_symlink,
+	// The right to invoke `path_remove_directory`.
+	path_remove_directory,
+	// The right to invoke `path_unlink_file`.
+	path_unlink_file,
+	// If `rights::fd_read` is set, includes the right to invoke `poll_oneoff` to subscribe to `eventtype::fd_read`.
+	// If `rights::fd_write` is set, includes the right to invoke `poll_oneoff` to subscribe to `eventtype::fd_write`.
+	poll_fd_readwrite,
+	// The right to invoke `sock_shutdown`.
+	sock_shutdown,
+	// The right to invoke `sock_accept`.
+	sock_accept
+}
+
+enum WspOneFdFlags {
+    // Create file if it does not exist.
+    creat,
+    // Fail if not a directory.
+    directory,
+    // Fail if file already exists.
+    excl,
+    // Truncate file to size 0.
+    trunc
+}
+
+enum WspOneClock {
+	realtime,
+	monotonic,
+	process_cputime_id,
+	thread_cputime_id
 }
