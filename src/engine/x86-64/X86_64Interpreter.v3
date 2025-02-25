@@ -89,6 +89,7 @@ class X86_64InterpreterCode extends RiUserCode {
 		if (func == null) buf.puts("(func=null)");
 		else if (instance == null) func.render(null, buf);
 		else func.render(instance.module.names, buf);
+		if (Debug.stack) buf.put2(" [ip=0x%x, sp=0x%x]", ip - Pointer.NULL, sp - Pointer.NULL);
 		buf.ln().send(out);
 		buf.reset();
 	}
@@ -103,6 +104,12 @@ class X86_64InterpreterCode extends RiUserCode {
 	// Called from V3 runtime when the garbage collector needs to scan an interpreter stack frame.
 	def scanFrame(ip: Pointer, sp: Pointer) {
 		// Handle code and interior pointers
+		if (Debug.stack) {
+			var buf = X86_64Runtime.globalFrameDescriptionBuf;
+			buf.put2("scanInterpreterFrame [ip=0x%x, sp=0x%x]", ip - Pointer.NULL, sp - Pointer.NULL).ln().send(Trace.STDOUT);
+			buf.reset();
+		}
+
 		var code_loc = (sp + X86_64InterpreterFrame.code.offset);
 		var code = code_loc.load<Pointer>();
 		var ip_delta = (sp + X86_64InterpreterFrame.ip.offset).load<Pointer>() - code;
@@ -362,6 +369,8 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		ivar_CURPC
 	];
 
+	var deferred: List<(X86_64Label, X86_64Label, X86_64Label -> void)>;
+
 	new() {
 		w.refill = reportOom;
 		var p = Patcher.new(w);
@@ -402,6 +411,13 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 				.ln();
 		}
 		if (w.pos > initialSize) fatal(Strings.format2("need %d bytes for interpreter code, only allocated %d", w.pos, initialSize));
+	}
+	def genConditionalJumpDeferred(cond: X86_64Cond, emit: X86_64Label -> void) {
+		var ool = X86_64Label.new();
+		asm.jc_rel_far(cond, ool);
+		var retpoint = X86_64Label.new();
+		asm.bind(retpoint);
+		deferred = List.new((ool, retpoint, emit), deferred);
 	}
 	def genTypeTagTable() {
 		if (FeatureDisable.complexBlockTypes) return;
@@ -616,9 +632,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		// check for extended LEB, abstract type, or type with immediate
 		var typeTableAddr = int.!((ic.start + typeTagTableOffset) - Pointer.NULL);
 		asm.test_m_i(typeGpr.plus(typeTableAddr), TYPE_HAS_IMM | TYPE_IS_LEB);
-		var complex_type_decode = X86_64Label.new();
-		asm.jc_rel_far(C.NZ, complex_type_decode);
-		asm.bind(type_done);
+		genConditionalJumpDeferred(C.NZ, genComplexTypeDecode(_, typeGpr));
 
 		// gen: if(num != 0) do
 		var start2 = X86_64Label.new(), done2 = X86_64Label.new();
@@ -637,48 +651,81 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		asm.jc_rel_near(C.NZ, start);
 		asm.bind(done);
 
-		// Check for function entry probe.
-		var func_entry_probe_label: X86_64Label;
-		if (!FeatureDisable.entryProbes) {
-			func_entry_probe_label = asm.newLabel();
-			asm.test_m_i(r_func_decl.plus(offsets.FuncDecl_entry_probed), 1);
-			asm.jc_rel_far(C.NZ, func_entry_probe_label);
+		// Check for any frame variables, which are used for either legacy exceptions or probes.
+		if (!FeatureDisable.frameVariables) {
+			asm.movq_r_m(r_tmp2, r_func_decl.plus(offsets.FuncDecl_frame_var_tags));
+			asm.q.cmp_r_i(r_tmp2, 0);
+			genConditionalJumpDeferred(C.NZ, genPushFrameVarTags(_, r_tmp2));
 		}
 
-		// execute first instruction
+		// Check for function entry probe.
+		if (!FeatureDisable.entryProbes) {
+			asm.test_m_i(r_func_decl.plus(offsets.FuncDecl_entry_probed), 1);
+			genConditionalJumpDeferred(C.NZ, genFuncEntryProbe);
+		}
+
+		// Dispatch to first instruction.
 		genDispatchOrJumpToDispatch();
 
-		// handle extended LEB, types with immediates, and abstract types
-		var type_not_leb = X86_64Label.new();
-		asm.bind(complex_type_decode);
-		asm.d.test_r_i(typeGpr, LEB_UPPER_BIT);		// check for LEB first
-		asm.jc_rel_near(C.Z, type_not_leb);
-		genSkipLeb0(r_tmp4);
-		asm.bind(type_not_leb);
-		// check for types that have an immediate
-		asm.d.test_m_i(typeGpr.plus(typeTableAddr), TYPE_HAS_IMM);
-		asm.jc_rel_near(C.Z, type_done);
-		genSkipLeb0(r_tmp4);			// skip offset
-		asm.jmp_rel_near(type_done);
-
-		// Emit code for function entry probe. XXX: move further out-of-line
-		if (func_entry_probe_label != null) {
-			asm.bind(func_entry_probe_label);
-			computePcFromCurIp();
-			if (!FeatureDisable.stacktraces) asm.movq_r_i(r_curpc, 0);
-			saveCallerIVars();
-			asm.movq_r_m(r_tmp0, m_wasm_func); // XXX: compute func and pc directly in the right regs
-			callRuntime(refRuntimeCall(RT.runtime_PROBE_instr), [r_tmp0, r_curpc], true);
-			// fall through
-			restoreCallerIVars();
-			//TODO: restoreDispatchTableReg();
-			genJumpToDispatch();
-		}
+		// Bind an entrypoint for deopt reentry.
 		ic.header.deoptReentryOffset = w.atEnd().pos;
 		restoreCallerIVars();
 		restoreReg(r_vsp);
 		restoreDispatchTableReg();
 		genJumpToDispatch();
+		genDeferred();
+	}
+	def genComplexTypeDecode(retpoint: X86_64Label, r_type: X86_64Gpr) {
+		// handle extended LEB, types with immediates, and abstract types
+		var type_not_leb = X86_64Label.new();
+		asm.d.test_r_i(r_type, LEB_UPPER_BIT);		// check for LEB first
+		asm.jc_rel_near(C.Z, type_not_leb);
+		genSkipLeb0(r_tmp4);
+		asm.bind(type_not_leb);
+		// check for types that have an immediate
+		var typeTableAddr = int.!((ic.start + typeTagTableOffset) - Pointer.NULL);
+		asm.d.test_m_i(r_type.plus(typeTableAddr), TYPE_HAS_IMM);
+		asm.jc_rel_far(C.Z, retpoint);
+		genSkipLeb0(r_tmp4);			// skip offset
+		asm.jmp_rel_near(retpoint);
+	}
+	def genFuncEntryProbe(retpoint: X86_64Label) {
+		computePcFromCurIp();
+		if (!FeatureDisable.stacktraces) asm.movq_r_i(r_curpc, 0);
+		saveCallerIVars();
+		asm.movq_r_m(r_tmp0, m_wasm_func); // XXX: compute func and pc directly in the right regs
+		callRuntime(refRuntimeCall(RT.runtime_PROBE_instr), [r_tmp0, r_curpc], true);
+		// fall through
+		restoreCallerIVars();
+		//TODO: restoreDispatchTableReg();
+		genJumpToDispatch();
+	}
+	def genPushFrameVarTags(retpoint: X86_64Label, r_frame_var_tags: X86_64Gpr) {
+		var r_start = r_frame_var_tags, r_end = r_tmp1, r_tag = r_tmp3;
+		asm.movd_r_m(r_end, r_frame_var_tags.plus(offsets.Array_length));
+		asm.q.lea(r_start, r_frame_var_tags.plus(offsets.Array_contents));
+		asm.q.add_r_r(r_end, r_start);
+		var loop = X86_64Label.new();
+		// while (r_start < r_end)
+		asm.bind(loop);
+		asm.q.cmp_r_r(r_start, r_end);
+		asm.jc_rel_far(C.GE, retpoint);
+		asm.movbzx_r_m(r_tag, r_start.plus(0));
+		genTagPushR(r_tag);			// *(sp) = type
+		asm.movq_m_i(vsph[0].value, 0);		// *(sp + 8) = 0
+		incrementVsp();	// sp += 1 slot
+		// gen: while (--num != 0)
+		asm.q.inc_r(r_start);
+		asm.jmp_rel_near(loop);
+	}
+	def genDeferred() {
+		for (l = deferred; l != null; l = l.tail) {
+			var t = l.head;
+			var ool = t.0, retpoint = t.1, emit = t.2;
+			asm.bind(ool);
+			emit(retpoint);
+		}
+		deferred = null;
 	}
 
 	// Generate all the opcode handlers.
@@ -855,13 +902,14 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		asm.movd_r_r(r_scratch, valcount);
 		asm.d.shl_r_i(r_scratch, valuerep.slot_size_log);
 		asm.q.sub_r_r(r_vsp, r_scratch);
-		// do { [vsp] = [vsp + popcount]; vsp++; valcount--; } while (valcount != 0)
+		// while(valcount-- >= 0) { [vsp] = [vsp + popcount]; vsp++; }
 		var loop = X86_64Label.new();
 		asm.bind(loop);
+		asm.d.dec_r(valcount);
+		asm.jc_rel_near(C.S, ctl_xfer_nostack);
 		genCopySlot(r_vsp.plus(0), r_vsp.plusR(popcount, 1, 0));
 		incrementVsp();
-		asm.d.dec_r(valcount);
-		asm.jc_rel_near(C.G, loop);
+		asm.jmp_rel_near(loop);
 
 		// ELSE, (legal) CATCH, (legacy) CATCH_ALL: unconditional ctl xfer without stack copying
 		bindHandlerNoAlign(Opcode.CATCH);
@@ -1000,9 +1048,8 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			genReadUleb32(r_tmp0);
 			saveCallerIVars();
 			callRuntime(refRuntimeCall(RT.runtime_THROW), [r_instance, r_tmp0], true);
-			restoreCallerIVars();
-			restoreDispatchTableReg();
-			genDispatchOrJumpToDispatch();
+			// should not return
+			asm.invalid();
 		}
 		bindHandler(Opcode.THROW_REF); {
 			computeCurIpForTrap(-1);
@@ -1011,9 +1058,15 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			decrementVsp();
 			saveCallerIVars();
 			callRuntime(refRuntimeCall(RT.runtime_THROW_REF), [r_tmp0], true);
-			restoreCallerIVars();
-			restoreDispatchTableReg();
-			genDispatchOrJumpToDispatch();
+			// should not return
+			asm.invalid();
+		}
+		if (!FeatureDisable.legacyExceptions) {
+			bindHandler(Opcode.DELEGATE);
+			genSkipLeb();
+			endHandler();
+
+			// TODO: bindHandlerNoAlign(Opcode.RETHROW);
 		}
 	}
 	def genLoopTierUpTrigger() {
@@ -2063,6 +2116,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			genSkipLeb();            	// skip target label
 			genSkipLeb();            	// skip src heaptype
 			genReadSleb32_inline(r_tmp1);	// read dest heaptype
+			computePcFromCurIp();
 			saveCallerIVars();
 			callRuntime(refRuntimeCall(RT.runtime_doCast), [r_instance, nullable_reg, r_tmp1], false);
 			restoreCurPcFromFrame();
@@ -2070,7 +2124,10 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			restoreCallerIVars();
 			var cond = if(t.0, C.Z, C.NZ); // TODO: br_on_cast/fail only differ on condition
 			asm.jc_rel_far(cond, controlSkipSidetableAndDispatchLabel); // XXX: relies on no changes to flags
-			restoreIpFromCurIp(-1); // TODO: sidetable entries are relative to current IP; we are at nextIP
+			asm.movq_r_m(r_tmp1, m_code);
+			// TODO: we recompute the start of the current instruction from the curpc and the code object,
+			//       because the sidetable entry's delta_ip is encoded relative to 1 + curpc
+			asm.lea(r_ip, X86_64Addr.new(r_tmp1, r_curpc, 1, 1 + offsets.Array_contents));
 			asm.jmp_rel_far(controlTransferLabel);
 		}
 		bindHandler(Opcode.REF_AS_NON_NULL); {
@@ -3585,9 +3642,6 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 	}
 	def computeCurIpFromIp(delta: int) {
 		asm.q.lea(r_curpc, X86_64Addr.new(r_ip, null, 1, delta - offsets.Array_contents));
-	}
-	def restoreIpFromCurIp(delta: int) {
-		asm.q.lea(r_ip, r_curpc.plus(0 - (delta - offsets.Array_contents)));
 	}
 	def computePcFromCurIp() {
 		if (!FeatureDisable.stacktraces) asm.q.sub_r_m(r_curpc, m_code);

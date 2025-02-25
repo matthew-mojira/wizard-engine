@@ -5,7 +5,7 @@ class V3Interpreter extends WasmStack {
 	private var instrTracer: InstrTracer;
 	private def values = ArrayStack<Value>.new();	// storage of all WasmValues
 	private var state_: StackState;
-	private var stack_switch_info: StackSwitchInfo;	// set when `state_` is `SUSPENDED` or `CALL_CHILD`
+	private var goto_stack: V3Interpreter; // set when state_ == {CALL_CHILD|SUSPENDED}
 	private var cache: V3Frame;			// cache of all V3Frame objects (bottom of stack)
 	private var frame: V3Frame;
 	private var host_frame: HostFrame;
@@ -60,11 +60,11 @@ class V3Interpreter extends WasmStack {
 		match (state_) {
 			THROWING => return clearAndThrow();
 			RETURNING => return clearAndReturn();
-			SUSPENDED => return Result.StackSwitch(stack_switch_info);
-			CALL_CHILD => return Result.StackSwitch(stack_switch_info);
+			SUSPENDED, CALL_CHILD => return Result.Switch(goto_stack);
 			_ => {
 				clear();
-				return Result.Throw(Trap.new(TrapReason.ERROR, "invalid interpreter state", null)); // TODO: error message for wrong state
+				var trap = Trap.new(TrapReason.ERROR, Strings.format1("invalid interpreter state: %s", state_.name), null);
+				return Result.Throw(trap);
 			}
 		}
 	}
@@ -183,7 +183,8 @@ class V3Interpreter extends WasmStack {
 			if (pc == 0) {
 				// Entering the function; initialize locals.
 				codeptr.iterate_local_codes(pushLocals);
-				for (i < func.decl.num_ex_slots) values.push(Values.REF_NULL); // init legacy EH slots
+				var tags = func.decl.frame_var_tags;
+				if (tags != null) for (t in tags) values.push(tagToValue(t));
 				frame.pc = pc = codeptr.pos; // update pc after decoding locals
 				// Fire entry probe(s).
 				if (func.decl.entry_probed) {
@@ -351,7 +352,7 @@ class V3Interpreter extends WasmStack {
 			CALL_INDIRECT => {
 				var sig_index = codeptr.read_uleb32();
 				var table_index = codeptr.read_uleb32();
-				var func_index = popu();
+				var func_index = popa(frame.func.instance.tables[table_index].decl.size);
 				var f = lookupIndirect(sig_index, table_index, func_index);
 				if (f != null) return doCallFunction(f);
 			}
@@ -364,7 +365,7 @@ class V3Interpreter extends WasmStack {
 			RETURN_CALL_INDIRECT => {
 				var sig_index = codeptr.read_uleb32();
 				var table_index = codeptr.read_uleb32();
-				var func_index = popu();
+				var func_index = popa(frame.func.instance.tables[table_index].decl.size);
 				var f = lookupIndirect(sig_index, table_index, func_index);
 				if (f != null) {
 					prepareReturnCall(f.sig);
@@ -490,22 +491,63 @@ class V3Interpreter extends WasmStack {
 			I64_ATOMIC_LOAD8_U	=> doAtomicLoad(ACCESS_U8, pushw8);
 			I64_ATOMIC_LOAD16_U	=> doAtomicLoad(ACCESS_U16, pushw16);
 			I64_ATOMIC_LOAD32_U	=> doAtomicLoad(ACCESS_U32, pushw32);
+			I32_ATOMIC_STORE	=> doAtomicStore(ACCESS_U32, popu);
+			I64_ATOMIC_STORE	=> doAtomicStore(ACCESS_U64, popw);
+			I32_ATOMIC_STORE8	=> doAtomicStore(ACCESS_U8, popu8);
+			I32_ATOMIC_STORE16	=> doAtomicStore(ACCESS_U16, popu16);
+			I64_ATOMIC_STORE8	=> doAtomicStore(ACCESS_U8, popw8);
+			I64_ATOMIC_STORE16	=> doAtomicStore(ACCESS_U16, popw16);
+			I64_ATOMIC_STORE32	=> doAtomicStore(ACCESS_U32, popw32);
 
 			I32_ATOMIC_RMW_ADD	=> doAtomicRmw(ACCESS_U32, popu(), 	V3Eval.I32_ADD, pushu);
+			I64_ATOMIC_RMW_ADD	=> doAtomicRmw(ACCESS_U64, popw(),	V3Eval.I64_ADD, pushw);
 			I32_ATOMIC_RMW8_ADD_U	=> doAtomicRmw(ACCESS_U8,  popu8(), 	u8.+, pushu8);
 			I32_ATOMIC_RMW16_ADD_U	=> doAtomicRmw(ACCESS_U16, popu16(), 	u16.+, pushu16);
+			I64_ATOMIC_RMW8_ADD_U	=> doAtomicRmw(ACCESS_U8,  popw8(), 	u8.+, pushw8);
+			I64_ATOMIC_RMW16_ADD_U	=> doAtomicRmw(ACCESS_U16, popw16(), 	u16.+, pushw16);
+			I64_ATOMIC_RMW32_ADD_U	=> doAtomicRmw(ACCESS_U32, popw32(), 	u32.+, pushw32);
 			I32_ATOMIC_RMW_SUB	=> doAtomicRmw(ACCESS_U32, popu(), 	V3Eval.I32_SUB, pushu);
+			I64_ATOMIC_RMW_SUB	=> doAtomicRmw(ACCESS_U64, popw(),	V3Eval.I64_SUB, pushw);
 			I32_ATOMIC_RMW8_SUB_U	=> doAtomicRmw(ACCESS_U8,  popu8(), 	u8.-, pushu8);
 			I32_ATOMIC_RMW16_SUB_U	=> doAtomicRmw(ACCESS_U16, popu16(), 	u16.-, pushu16);
+			I64_ATOMIC_RMW8_SUB_U	=> doAtomicRmw(ACCESS_U8,  popw8(), 	u8.-, pushw8);
+			I64_ATOMIC_RMW16_SUB_U	=> doAtomicRmw(ACCESS_U16, popw16(), 	u16.-, pushw16);
+			I64_ATOMIC_RMW32_SUB_U	=> doAtomicRmw(ACCESS_U32, popw32(), 	u32.-, pushw32);
 			I32_ATOMIC_RMW_AND	=> doAtomicRmw(ACCESS_U32, popu(), 	V3Eval.I32_AND, pushu);
+			I64_ATOMIC_RMW_AND	=> doAtomicRmw(ACCESS_U64, popw(),	V3Eval.I64_AND, pushw);
 			I32_ATOMIC_RMW8_AND_U	=> doAtomicRmw(ACCESS_U8,  popu8(), 	u8.&, pushu8);
 			I32_ATOMIC_RMW16_AND_U	=> doAtomicRmw(ACCESS_U16, popu16(), 	u16.&, pushu16);
+			I64_ATOMIC_RMW8_AND_U	=> doAtomicRmw(ACCESS_U8,  popw8(), 	u8.&, pushw8);
+			I64_ATOMIC_RMW16_AND_U	=> doAtomicRmw(ACCESS_U16, popw16(), 	u16.&, pushw16);
+			I64_ATOMIC_RMW32_AND_U	=> doAtomicRmw(ACCESS_U32, popw32(), 	u32.&, pushw32);
 			I32_ATOMIC_RMW_OR	=> doAtomicRmw(ACCESS_U32, popu(), 	V3Eval.I32_OR, pushu);
+			I64_ATOMIC_RMW_OR	=> doAtomicRmw(ACCESS_U64, popw(),	V3Eval.I64_AND, pushw);
 			I32_ATOMIC_RMW8_OR_U	=> doAtomicRmw(ACCESS_U8,  popu8(), 	u8.|, pushu8);
 			I32_ATOMIC_RMW16_OR_U	=> doAtomicRmw(ACCESS_U16, popu16(), 	u16.|, pushu16);
+			I64_ATOMIC_RMW8_OR_U	=> doAtomicRmw(ACCESS_U8,  popw8(), 	u8.|, pushw8);
+			I64_ATOMIC_RMW16_OR_U	=> doAtomicRmw(ACCESS_U16, popw16(), 	u16.|, pushw16);
+			I64_ATOMIC_RMW32_OR_U	=> doAtomicRmw(ACCESS_U32, popw32(), 	u32.|, pushw32);
 			I32_ATOMIC_RMW_XOR	=> doAtomicRmw(ACCESS_U32, popu(), 	V3Eval.I32_XOR, pushu);
+			I64_ATOMIC_RMW_XOR	=> doAtomicRmw(ACCESS_U64, popw(),	V3Eval.I64_XOR, pushw);
 			I32_ATOMIC_RMW8_XOR_U	=> doAtomicRmw(ACCESS_U8,  popu8(), 	u8.^, pushu8);
 			I32_ATOMIC_RMW16_XOR_U	=> doAtomicRmw(ACCESS_U16, popu16(), 	u16.^, pushu16);
+			I64_ATOMIC_RMW8_XOR_U	=> doAtomicRmw(ACCESS_U8,  popw8(), 	u8.^, pushw8);
+			I64_ATOMIC_RMW16_XOR_U	=> doAtomicRmw(ACCESS_U16, popw16(), 	u16.^, pushw16);
+			I64_ATOMIC_RMW32_XOR_U	=> doAtomicRmw(ACCESS_U32, popw32(), 	u32.^, pushw32);
+			I32_ATOMIC_RMW_XCHG	=> doAtomicXchg(ACCESS_U32, popu(), 	pushu);
+			I64_ATOMIC_RMW_XCHG	=> doAtomicXchg(ACCESS_U64, popw(),	pushw);
+			I32_ATOMIC_RMW8_XCHG_U	=> doAtomicXchg(ACCESS_U8,  popu8(), 	pushu8);
+			I32_ATOMIC_RMW16_XCHG_U	=> doAtomicXchg(ACCESS_U16, popu16(), 	pushu16);
+			I64_ATOMIC_RMW8_XCHG_U	=> doAtomicXchg(ACCESS_U8,  popw8(), 	pushw8);
+			I64_ATOMIC_RMW16_XCHG_U	=> doAtomicXchg(ACCESS_U16, popw16(), 	pushw16);
+			I64_ATOMIC_RMW32_XCHG_U	=> doAtomicXchg(ACCESS_U32, popw32(), 	pushw32);
+			I32_ATOMIC_RMW_CMPXCHG		=> doAtomicCmpXchg(ACCESS_U32, popu(), popu(), pushu);
+			I64_ATOMIC_RMW_CMPXCHG		=> doAtomicCmpXchg(ACCESS_U64, popw(), popw(), pushw);
+			I32_ATOMIC_RMW8_CMPXCHG_U	=> doAtomicCmpXchg(ACCESS_U8, popu8(), popu8(), pushu8);
+			I32_ATOMIC_RMW16_CMPXCHG_U	=> doAtomicCmpXchg(ACCESS_U16, popu16(), popu16(), pushu16);
+			I64_ATOMIC_RMW8_CMPXCHG_U	=> doAtomicCmpXchg(ACCESS_U8, popw8(), popw8(), pushw8);
+			I64_ATOMIC_RMW16_CMPXCHG_U	=> doAtomicCmpXchg(ACCESS_U16, popw16(), popw16(), pushw16);
+			I64_ATOMIC_RMW32_CMPXCHG_U	=> doAtomicCmpXchg(ACCESS_U32, popw32(), popw32(), pushw32);
 
 			MEMORY_SIZE => {
 				var index = codeptr.read_uleb32();
@@ -762,7 +804,7 @@ class V3Interpreter extends WasmStack {
 				Runtime.ARRAY_SET(this, frame.func.instance, array_index);
 			}
 			ARRAY_LEN => {
-				var obj = HeapArray.!(popr().val);
+				var obj = popArray();
 				if (obj == null) trap(TrapReason.NULL_DEREF);
 				else push(Value.I32(u32.view(obj.vals.length)));
 			}
@@ -1153,21 +1195,14 @@ class V3Interpreter extends WasmStack {
 				var cont_idx = codeptr.read_uleb32();
 				var handlers = codeptr.read_handlers();
 
-				var sidetable = frame.func.decl.sidetable;
-
 				var cont_type = ContDecl.!(frame.func.instance.heaptypes[cont_idx]);
-				var cont = Continuation.!(Value.Ref.!(pop()).val);
+				var cont = popContinuation();
 				if (cont == null) return void(trap(TrapReason.NULL_DEREF));
 				if (cont.used) return void(trap(TrapReason.USED_CONTINUATION));
-				cont.used = true;
+				if (Trace.stack) Trace.OUT.put1("resume %q", cont.render).ln();
 
-				var n_binds = cont_type.sig.params.length;
-				cont.top.bind(values.peekn(n_binds));
-				values.top -= n_binds;
-
-				prev_resume_pc = frame.pc;
-				state_ = StackState.CALL_CHILD;
-				stack_switch_info = StackSwitchInfo.RunChildStack(cont);
+				cont.top.bind(popN(cont_type.sig.params));
+				setupResume(cont);
 				return; // skip setting frame.pc = codeptr.pos
 			}
 			RESUME_THROW => {
@@ -1176,61 +1211,71 @@ class V3Interpreter extends WasmStack {
 				var handlers = codeptr.read_handlers();
 
 				var cont_type = ContDecl.!(frame.func.instance.heaptypes[cont_idx]);
-				var cont = Continuation.!(Value.Ref.!(pop()).val);
+				var cont = popContinuation();
 				if (cont == null) return void(trap(TrapReason.NULL_DEREF));
 				if (cont.used) return void(trap(TrapReason.USED_CONTINUATION));
 
-				var exn_tag = frame.func.instance.tags[tag_idx];
-				var n_vals = exn_tag.sig.params.length;
-				var vals = Ranges.dup(values.peekn(n_vals));
-				values.top -= n_vals;
-				var throwable = Exception.new(exn_tag, vals, null);
-
-				cont.used = true;
-				var res = cont.top.throw(throwable);
-				prev_resume_pc = frame.pc;
-				state_ = StackState.CALL_CHILD;
-				stack_switch_info = StackSwitchInfo.RunChildStack(cont);
+				var tag = frame.func.instance.tags[tag_idx];
+				if (Trace.stack) Trace.OUT.put2("resume_throw %q %q", tag.render, cont.render).ln();
+				cont.top.throw(Exception.new(tag, popN(tag.sig.params), null));
+				setupResume(cont);
+				return; // skip setting frame.pc = codeptr.pos
 			}
 			SUSPEND => {
 				var tag = frame.func.instance.tags[codeptr.read_uleb32()];
-				var n_vals = tag.sig.params.length;
-				var range = Ranges.dup(values.peekn(n_vals));
-				values.top -= n_vals;
 
 				state_ = StackState.SUSPENDED;
 				params_arity = tag.sig.results.length;
-				stack_switch_info = StackSwitchInfo.Suspend(this, tag, range);
+
+				var bottom = unwindParentChain(V3Interpreter.tryHandleSuspend(_, tag));
+				if (bottom == null) return;
+				var cont = Continuation.new(this, bottom);
+				var handler = V3Interpreter.!(bottom.parent);
+				handler.pushN(popN(tag.sig.params));
+				handler.push(Value.Ref(cont));
+				goto_stack = handler;
 			}
 			SWITCH => {
 				// `other_cont`: the continuation to switch to
 				// `this_cont`: the continuation created by this {switch}:
-				//							(bottom: <handler stack child>, top: <curStack>)
+				//              (bottom: <handler stack child>, top: <curStack>)
 				var other_cont_idx = codeptr.read_uleb32();
 				var tag_idx = codeptr.read_uleb32();
 
 				var tag = frame.func.instance.tags[tag_idx];
 				var other_cont_decl = ContDecl.!(frame.func.instance.heaptypes[other_cont_idx]);
-				var other_cont = Continuation.!(popObject());
+				var other_cont = popContinuation();
 				if (other_cont == null) return void(trap(TrapReason.NULL_DEREF));
 				if (other_cont.used) return void(trap(TrapReason.USED_CONTINUATION));
 
-				// -1 for excluding the continuation parameter
-				var n_vals = other_cont_decl.sig.params.length - 1;
-				var range = Ranges.dup(values.peekn(n_vals));
-				values.top -= n_vals;
+				// -1 to exclude continuation parameter
+				var other_params = other_cont_decl.sig.params;
+				var vals = popN(other_params[0 ... other_params.length - 1]);
 
 				var other_top_val = other_cont_decl.sig.params[other_cont_decl.sig.params.length - 1];
 				var this_cont_decl = ContDecl.!(HeapType.Cont.!(ValueType.Ref.!(other_top_val).heap).cont);
 
 				state_ = StackState.SUSPENDED;
 				params_arity = this_cont_decl.sig.params.length;
-				stack_switch_info = StackSwitchInfo.Switch(other_cont, this, tag, range);
+
+				var bottom = unwindParentChain(V3Interpreter.canHandleSwitch(_, tag));
+				if (bottom == null) return;
+				var handler = V3Interpreter.!(bottom.parent);
+				bottom.parent = null;
+
+				other_cont.used = true;
+				other_cont.bottom.parent = handler;
+				other_cont.top.bind(vals);
+				other_cont.top.bind([Value.Ref(Continuation.new(this, bottom))]);
+				goto_stack = V3Interpreter.!(other_cont.top);
 			}
 			INVALID => trap(TrapReason.INVALID_OPCODE);
+/*
+	Uncomment if introducing a new, unimplemented instruction.
 			_ => {
 				trap(TrapReason.UNIMPLEMENTED);
 			}
+*/
 		}
 		if (frame != null) frame.pc = codeptr.pos;
 	}
@@ -1250,6 +1295,12 @@ class V3Interpreter extends WasmStack {
 		if (t.reason != TrapReason.NONE) return void(trap(t.reason));
 		push(accessor.read(t.result)); // XXX: assumes "read" function is atomic
 	}
+	def doAtomicStore<T>(accessor: MemoryAccessor<T>, pop: void -> T) {
+		var val = pop();
+		var t = decodeMemArgAndGetMemoryRange(accessor.size);
+		if (t.reason != TrapReason.NONE) return void(trap(t.reason));
+		accessor.write(t.result, val); // XXX: assumes "write" function is atomic
+	}
 	def doAtomicRmw<T>(accessor: MemoryAccessor<T>, val: T, op: (T, T) -> T, push: T -> void) {
 		var t = decodeMemArgAndGetMemoryRange(accessor.size);
 		if (t.reason != TrapReason.NONE) return void(trap(t.reason));
@@ -1257,6 +1308,20 @@ class V3Interpreter extends WasmStack {
 		var updated = op(prev, val);
 		accessor.write(t.result, updated);
 		push(prev);
+	}
+	def doAtomicXchg<T>(accessor: MemoryAccessor<T>, replacement: T, push: T -> void) {
+		var t = decodeMemArgAndGetMemoryRange(accessor.size);
+		if (t.reason != TrapReason.NONE) return void(trap(t.reason));
+		var loaded = accessor.read(t.result); // XXX: assumes no real threads
+		accessor.write(t.result, replacement);
+		push(loaded);
+	}
+	def doAtomicCmpXchg<T>(accessor: MemoryAccessor<T>, replacement: T, expected: T, push: T -> void) {
+		var t = decodeMemArgAndGetMemoryRange(accessor.size);
+		if (t.reason != TrapReason.NONE) return void(trap(t.reason));
+		var loaded = accessor.read(t.result); // XXX: assumes no real threads
+		if (loaded == expected) accessor.write(t.result, replacement);
+		push(loaded);
 	}
 	def doLoadLane<T>(accessor: MemoryAccessor<T>) {
 		var v = pops();
@@ -1457,7 +1522,8 @@ class V3Interpreter extends WasmStack {
 		var e = sidetable.getBrEntry(stp);
 		frame.stp = stp + e.dstp;
 		if (e.popcount > 0) {
-			copyVals(e.valcount, values.top - int.!(e.popcount + e.valcount));
+			if (e.valcount > 0) copyVals(e.valcount, values.top - int.!(e.popcount + e.valcount));
+			else values.top -= e.popcount;
 		}
 		return pc + e.dpc;
 	}
@@ -1484,7 +1550,7 @@ class V3Interpreter extends WasmStack {
 		copyVals(sig.params.length, frame.fp);
 		frame = popFrame();
 	}
-	def lookupIndirect(sig_index: u32, table_index: u32, func_index: u32) -> Function {
+	def lookupIndirect(sig_index: u32, table_index: u32, func_index: u64) -> Function {
 		var instance = frame.func.instance;
 		var table = instance.tables[table_index];
 		if (func_index >= table.elems.length) {
@@ -1522,15 +1588,16 @@ class V3Interpreter extends WasmStack {
 		var handler = frame.func.decl.findSwitchHandler(frame.func.instance, tag, prev_resume_pc);
 		return handler.handler_pc >= 0; // {switch} entries uses `0` as dummy handler pc
 	}
-	// Returns whether the suspend got handled.
-	def tryHandleSuspend(cont: Continuation, tag: Tag, vals: Array<Value>) -> bool {
+	// Returns whether the suspend got handled. This does NOT push the values and
+	// the remaining continuation, but implicit popping and goto are handled.
+	def tryHandleSuspend(tag: Tag) -> bool {
 		var handler = frame.func.decl.findSuspendHandler(frame.func.instance, tag, prev_resume_pc);
 		if (handler.handler_pc < 0) return false;
 
 		prev_resume_pc = -1;
 		values.top = frame.fp + handler.val_stack_top + frame.func.decl.num_locals;
-		values.pusha(vals);
-		values.push(Value.Ref(cont));
+		// values.pusha(vals);
+		// values.push(Value.Ref(cont));
 
 		var code = frame.func.decl.cur_bytecode;
 		frame.pc = handler.handler_pc;
@@ -1558,7 +1625,7 @@ class V3Interpreter extends WasmStack {
 					f.stp = handler.sidetable_pos;
 					codeptr.reset(code, f.pc, code.length);
 					// TODO: clean up frame math here
-					values.top = f.fp + handler.val_stack_top + f.func.decl.num_locals + f.func.decl.num_ex_slots;
+					values.top = f.fp + handler.val_stack_top + f.func.decl.num_slots();
 					for (v in ex.vals) values.push(v);
 					if (handler.ex_slot >= 0) {
 						if (Trace.exception) Trace.OUT.put2("  set_ex_slot fp=%d, ex_slot=%d", f.fp, handler.ex_slot).ln();
@@ -1605,6 +1672,9 @@ class V3Interpreter extends WasmStack {
 	def pops() -> (u64, u64) { return Values.unbox_s(values.pop()); }
 	def popr() -> Value.Ref { return Value.Ref.!(values.pop()); } // TODO: i31
 	def popObject() -> Object { return Value.Ref.!(values.pop()).val; }
+	def popArray() -> HeapArray { return HeapArray.!(Value.Ref.!(values.pop()).val); }
+	def popStruct() -> HeapStruct { return HeapStruct.!(Value.Ref.!(values.pop()).val); }
+	def popContinuation() -> Continuation { return Continuation.!(Value.Ref.!(values.pop()).val); }
 	def push(val: Value) { values.push(val); }
 	def pushi(val: i32) { values.push(Value.I32(u32.view(val))); }
 	def pushi8(val: i8) { values.push(Value.I32(u32.view(val))); }
@@ -1624,12 +1694,25 @@ class V3Interpreter extends WasmStack {
 	def pushd(val: double) { values.push(Value.F64(u64.view(val))); }
 	def pushz(val: bool) { values.push(if(val, Values.I32_1, Values.I32_0)); }
 	def pushs(low: u64, high: u64) { values.push(Value.V128(low, high)); }
+	def pushN(vs: Range<Value>) { for (i < vs.length) push(vs[i]); }
 	def popN(t: Range<ValueType>) -> Array<Value> {
 		var result = Array<Value>.new(t.length);
 		var sp = values.top - t.length;
 		for (i < t.length) result[i] = values.elems[sp + i];
 		values.top = sp;
 		return result;
+	}
+	def tagToValue(t: byte) -> Value {
+		match (t) {
+			BpTypeCode.I8.code,
+			BpTypeCode.I16.code,
+			BpTypeCode.I32.code => return Values.I32_0;
+			BpTypeCode.I64.code => return Values.I64_0;
+			BpTypeCode.F32.code => return Values.F32_0;
+			BpTypeCode.F64.code => return Values.F64_0;
+			BpTypeCode.V128.code => return Values.V128_0;
+			_ => return Values.REF_NULL;
+		}
 	}
 	// XXX: reduce duplication of d_xx_x methods
 	def do_dd_d(f: (double, double) -> double) {
@@ -1826,6 +1909,24 @@ class V3Interpreter extends WasmStack {
 			last_fp = f.fp;
 		}
 	}
+	private def setupResume(cont: Continuation) {
+		cont.used = true;
+		prev_resume_pc = frame.pc;
+		state_ = StackState.CALL_CHILD;
+		cont.bottom.parent = this;
+		goto_stack = V3Interpreter.!(cont.top);
+	}
+	// returns the last stack where {pred} is {false} on
+	private def unwindParentChain(pred: V3Interpreter -> bool) -> V3Interpreter {
+		var stack = this;
+		while (stack.parent != null) {
+			var prev = stack;
+			stack = V3Interpreter.!(stack.parent);
+			if (pred(stack)) return prev;
+		}
+		trap(TrapReason.INVALID_SUSPEND);
+		return null;
+	}
 }
 
 class V3Frame {
@@ -1896,11 +1997,24 @@ class V3FrameAccessor(frame: V3Frame) extends FrameAccessor {
 		checkNotUnwound();
 		return frame.func.decl.num_locals;
 	}
+	// Get the number of frame variables in this frame.
+	def numFrameVars() -> int {
+		checkNotUnwound();
+		var tags = frame.func.decl.frame_var_tags;
+		return if(tags != null, tags.length);
+	}
 	// Get the value of local variable {i}.
 	def getLocal(i: int) -> Value {
 		checkNotUnwound();
 		if (u32.view(i) >= frame.func.decl.num_locals) fatal("local index out-of-bounds");
 		return frame.stack.values.elems[frame.fp + i];
+	}
+	// Get the value of frame variable {i}.
+	def getFrameVar(i: int) -> Value {
+		checkNotUnwound();
+		var decl = frame.func.decl;
+		if (decl.frame_var_tags == null || u32.view(i) >= decl.frame_var_tags.length) fatal("frame var index out-of-bounds");
+		return frame.stack.values.elems[frame.fp + decl.num_locals + i];
 	}
 	// Get the number of operand stack elements.
 	def numOperands() -> int {
@@ -1935,6 +2049,14 @@ private class V3FrameWriter extends FrameWriter {
 		accessor.checkNotUnwound();
 		if (u32.view(i) >= accessor.frame.func.decl.num_locals) fatal("local index out-of-bounds");
 		accessor.frame.stack.values.elems[accessor.frame.fp + i] = v;
+	}
+	// Set the value of a frame variable. (dynamically typechecked).
+	def setFrameVar(i: int, v: Value) {
+		// TODO: dynamically typecheck
+		accessor.checkNotUnwound();
+		var frame = accessor.frame, decl = frame.func.decl;
+		if (decl.frame_var_tags == null || u32.view(i) >= decl.frame_var_tags.length) fatal("frame var index out-of-bounds");
+		frame.stack.values.elems[frame.fp + decl.num_locals + i] = v;
 	}
 }
 def fatal = System.error("V3InterpreterError", _);

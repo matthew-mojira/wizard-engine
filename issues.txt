@@ -54,11 +54,9 @@ Prio	Component	Issue
 	wizeng		Load tool-convention core dumps
 	wizeng		repl for loading and running modules
 
-
-
 Monitors + trace
 --------------------------------
-	All --trace-interpreter, memory, calls, etc output events in code in nested call trace format
+	All --trace-interpreter, memory, calls, etc output events in code in common nested call trace format
 	   > func1
 	     > func2A
 	       call event
@@ -131,7 +129,19 @@ Monitors + trace
 	DeadCodeEliminator
 	   - uses results from coverage to insert UNREACHABLE into unreachable paths,
 	     then feed to optimizer like Binaryen
-
+	NanCanonicalizer
+	   - probe all instructions that can produce NaN and replace result via
+	     FrameAccessor with canonical nan (or 0, like denan from Binaryen)
+	Taint
+	   - propagate taint labels from certain calls through locals, memory, tables,
+	     remove them through certain calls, and check they don't reach other calls.
+	Memoizer
+	   - detect statically=, dynamically=, and empirically-pure functions
+	   - for functions that read mutable state, consider the values of recorded
+	     mutable locations as part of the key for memoization
+	Metadata
+	   - estimate of metadata usage for the program, including size of module,
+	     tables, functions, objects, stacks etc
 
 
 
@@ -265,6 +275,7 @@ Inline WasmObject.values array
 
 Done
 --------------------------------
+        spc             support all Wasm-GC opcodes
 	spc		non-final subtyping check for call_indirect
 	gc		implement array.new_data, array.new_elem in init expressions
 	gc		Test for final types

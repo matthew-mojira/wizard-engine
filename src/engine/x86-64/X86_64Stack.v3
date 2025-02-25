@@ -71,13 +71,7 @@ class X86_64Stack extends WasmStack {
 		while (bottom.parent != null) bottom = X86_64Stack.!(bottom.parent); // find bottom of this stack
 		state_ = StackState.RUNNING;
 		var thrown = V3_STACK_RESUME_FUNC.get()(this, bottom);
-		if (thrown != null) {
-			if (Trap.?(thrown) && Trap.!(thrown).reason == TrapReason.INVALID_SUSPEND) {
-				// TODO[ss]: suspend info
-				return Result.StackSwitch(StackSwitchInfo.Suspend(null, null, []));
-			}
-			return Result.Throw(thrown);
-		}
+		if (thrown != null) return Result.Throw(thrown);
 		var r = popResult(return_results);
 		clear();
 		return r;
@@ -193,14 +187,15 @@ class X86_64Stack extends WasmStack {
 			// XXX: handle exceptions in SPC code too
 			accessor.deoptToInterpreter0(func.decl, handler.handler_pc, handler.sidetable_pos);
 			var vfp: Pointer = accessor.vfp();
-			var slot_num = (handler.val_stack_top + func.decl.num_locals + func.decl.num_ex_slots);
+			var slot_num = (handler.val_stack_top + func.decl.num_slots());
 			var vsp = vfp + (slot_num * valuerep.slot_size);
 			this.vsp = vsp;
 			if (Trace.exception) Trace.OUT.put3("  push %d vfp=0x%x, vsp=0x%x", ex.vals.length, vfp - Pointer.NULL, vsp - Pointer.NULL).ln();
 			for (v in ex.vals) this.push(v);
 			if (handler.ex_slot >= 0) {
 				if (Trace.exception) Trace.OUT.put2("  set_ex_slot vfp=0x%x, ex_slot=%d", vfp - Pointer.NULL, handler.ex_slot).ln();
-				this.writeValue(vfp, func.decl.num_locals + handler.ex_slot, Value.Ref(ex));
+				var ptr = vfp + (func.decl.num_locals + handler.ex_slot) * valuerep.slot_size;
+				this.storeValue(ptr, Value.Ref(ex));
 			}
 			if (handler.push_exnref) {
 				if (Trace.exception) Trace.OUT.puts("  push_exnref").ln();
@@ -260,26 +255,19 @@ class X86_64Stack extends WasmStack {
 	}
 
 	def push(v: Value) {
-		match (v) {
-			Ref(obj) => pushPair(BpTypeCode.REF_NULL.code, obj);
-			I31(val) => pushPair(BpTypeCode.I31REF.code, (u64.view(val) << 1) | 1);
-			I32(val) => pushPair(BpTypeCode.I32.code, u64.view(val));
-			I64(val) => pushPair(BpTypeCode.I64.code, u64.view(val));
-			F32(bits) => pushPair(BpTypeCode.F32.code, u64.view(bits));
-			F64(bits) => pushPair(BpTypeCode.F64.code, u64.view(bits));
-			V128(low, high) => {
-				if (valuerep.tagged) vsp.store<u8>(BpTypeCode.V128.code); // XXX: factor out
-				(vsp + valuerep.tag_size).store(u64.view(low));
-				(vsp + valuerep.tag_size + 8).store(u64.view(high));
-				vsp += valuerep.slot_size;
-			}
-		}
+		var ptr = vsp;
+		vsp += valuerep.slot_size;
+		storeValue(ptr, v);
 	}
 	def pushi(v: int) {
-		pushPair(BpTypeCode.I32.code, u64.view(v));
+		if (valuerep.tagged) vsp.store<u8>(BpTypeCode.I32.code);
+		(vsp + valuerep.tag_size).store(v);
+		vsp += valuerep.slot_size;
 	}
 	def pushu(v: u32) {
-		pushPair(BpTypeCode.I32.code, u64.view(v));
+		if (valuerep.tagged) vsp.store<u8>(BpTypeCode.I32.code);
+		(vsp + valuerep.tag_size).store(v);
+		vsp += valuerep.slot_size;
 	}
 	def pushN(vs: Range<Value>) {
 		for (i < vs.length) push(vs[i]);
@@ -425,7 +413,42 @@ class X86_64Stack extends WasmStack {
 			}
 		}
 	}
-	def writeValue(base: Pointer, offset: int, v: Value) {
+	def storeValue(ptr: Pointer, v: Value) {
+		var tag_ptr = ptr;
+		var val_ptr = ptr + valuerep.tag_size;
+		match (v) {
+			Ref(obj) => {
+				if (valuerep.tagged) tag_ptr.store<u8>(BpTypeCode.REF_NULL.code);
+				val_ptr.store(obj);
+			}
+			I31(val) => {
+				if (valuerep.tagged) tag_ptr.store<u8>(BpTypeCode.I31REF.code);
+				val_ptr.store((u64.view(val) << 1) | 1);
+			}
+			I32(val) => {
+				if (valuerep.tagged) tag_ptr.store<u8>(BpTypeCode.I32.code);
+				val_ptr.store(val);
+			}
+			I64(val) => {
+				if (valuerep.tagged) tag_ptr.store<u8>(BpTypeCode.I64.code);
+				val_ptr.store(val);
+			}
+			F32(bits) => {
+				if (valuerep.tagged) tag_ptr.store<u8>(BpTypeCode.F32.code);
+				val_ptr.store(bits);
+			}
+			F64(bits) => {
+				if (valuerep.tagged) tag_ptr.store<u8>(BpTypeCode.F64.code);
+				val_ptr.store(bits);
+			}
+			V128(low, high) => {
+				if (valuerep.tagged) tag_ptr.store<u8>(BpTypeCode.V128.code);
+				(val_ptr + 0).store(u64.view(low));
+				(val_ptr + 8).store(u64.view(high));
+			}
+		}
+	}
+	def overwriteValue(base: Pointer, offset: int, v: Value) {
 		if (!valuerep.tagged) fatal("untyped frame access requires value tagging to be enabled");
 		var tp = base + offset * valuerep.slot_size;
 		var vp = tp + valuerep.tag_size;
@@ -893,12 +916,24 @@ class X86_64FrameAccessor(stack: X86_64Stack, sp: Pointer, decl: FuncDecl) exten
 		checkNotUnwound();
 		return decl.num_locals;
 	}
+	// Get the number of local variables in this frame.
+	def numFrameVars() -> int {
+		checkNotUnwound();
+		return if(decl.frame_var_tags != null, decl.frame_var_tags.length);
+	}
 	// Get the value of local variable {i}.
 	def getLocal(i: int) -> Value {
 		checkNotUnwound();
 		checkLocalBounds(i);
 		var vfp = (sp + X86_64InterpreterFrame.vfp.offset).load<Pointer>();
 		return stack.readValue(vfp, i);
+	}
+	// Get the value of frame variable {i}.
+	def getFrameVar(i: int) -> Value {
+		checkNotUnwound();
+		checkFrameVarBounds(i);
+		var vfp = (sp + X86_64InterpreterFrame.vfp.offset).load<Pointer>();
+		return stack.readValue(vfp, i + decl.num_locals);
 	}
 	// Get the number of operand stack elements.
 	def numOperands() -> int {
@@ -944,6 +979,11 @@ class X86_64FrameAccessor(stack: X86_64Stack, sp: Pointer, decl: FuncDecl) exten
 		if (u32.view(i) >= decl.num_locals) System.error("FrameAccessorError",
 			Strings.format2("local index %d out-of-bounds (%d)", u32.view(i), decl.num_locals));
 	}
+	private def checkFrameVarBounds(i: int) {
+		var num = if(decl.frame_var_tags != null, decl.frame_var_tags.length);
+		if (u32.view(i) >= num) System.error("FrameAccessorError",
+			Strings.format2("frame index %d out-of-bounds (%d)", u32.view(i), num));
+	}
 	private def deoptToInterpreter() {
 		var wf = func(), func = wf.decl;
 		var pc = this.pc();
@@ -984,7 +1024,15 @@ private class X86_64FrameWriter extends FrameWriter {
 		accessor.checkNotUnwound();
 		accessor.checkLocalBounds(i);
 		var vfp = (accessor.sp + X86_64InterpreterFrame.vfp.offset).load<Pointer>();
-		accessor.stack.writeValue(vfp, i, v);
+		accessor.stack.overwriteValue(vfp, i, v);
+		if (accessor.isSpc()) accessor.deoptToInterpreter();
+	}
+	// Set the value of a frame variable. (dynamically typechecked).
+	def setFrameVar(i: int, v: Value) {
+		accessor.checkNotUnwound();
+		accessor.checkFrameVarBounds(i);
+		var vfp = (accessor.sp + X86_64InterpreterFrame.vfp.offset).load<Pointer>();
+		accessor.stack.overwriteValue(vfp, i + accessor.decl.num_locals, v);
 		if (accessor.isSpc()) accessor.deoptToInterpreter();
 	}
 }

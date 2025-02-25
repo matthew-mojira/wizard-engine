@@ -12,7 +12,7 @@ HERE="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
 
 make_binary spectest || exit $?
 
-CMD="$BINARY $WIZENG_OPTS -expected=$WIZENG_LOC/test/regress.failures -expected=$WIZENG_LOC/test/regress.failures.${TEST_TARGET}"
+CMD="$BINARY $WIZENG_OPTS -expected=$WIZENG_LOC/test/regress.failures -expected=$WIZENG_LOC/test/regress.failures.${TEST_TARGET} -expected=$WIZENG_LOC/test/regress.failures.${TEST_TARGET}.${TEST_MODE}"
 
 cd $WIZENG_LOC
 
@@ -20,9 +20,13 @@ TESTS="$@"
 
 function run_tests() {
 	if [ "$TESTS" =  "" ]; then
-		for dir in core gen; do
-		TESTS=$(ls test/regress/$dir/*.bin.wast)
-		$CMD $TESTS
+		for dir in core gen legacy-exceptions; do
+		    TESTS=$(ls test/regress/$dir/*.bin.wast)
+		    FLAGS=
+		    if [ -e test/regress/$dir/flags ]; then
+			FLAGS=$(cat test/regress/$dir/flags)
+		    fi
+		    $CMD $FLAGS $TESTS
 		done
 
 	for ext in $(find test/regress -type d) ; do
