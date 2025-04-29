@@ -25,6 +25,8 @@ class SpcExecEnv {
 	var runtime_arg0: Reg;
 	var runtime_arg1: Reg;
 	var runtime_arg2: Reg;
+	var runtime_arg3: Reg;
+	var runtime_arg4: Reg;
 	var runtime_ret0: Reg;
 	var runtime_ret1: Reg;
 	var ret_throw: Reg;
@@ -322,6 +324,7 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 	}
 	def emitProbe0(pc: int, probe: Probe) {
 		// Check for intrinsified probes.
+		var spillMode = this.probeSpillMode;
 		match (probe) { // TODO: emit code for multiple intrinsified probes.
 			null => ;
 			x: MemoryReadProbe => if (SpcTuning.intrinsifyMemoryProbes && x.size <= 8) {
@@ -368,21 +371,31 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 				emitWhammProbe(x);
 				return;
 			}
+			x: TracePointProbe => {
+				// Tracepoints are used to help debug the JIT. Saving but not freeing
+				// the registers has less effect on the surrounding code, making it
+				// less likely to hide bugs.
+				spillMode = SpillMode.SAVE_ONLY;
+			}
 		}
 		// spill everything
-		state.emitSaveAll(resolver, probeSpillMode);
+		state.emitSaveAll(resolver, spillMode);
 		// compute VSP for potential frame access
 		emit_compute_vsp(regs.vsp, state.sp);
 		emit_spill_vsp(regs.vsp);
 		masm.emit_store_curstack_vsp(regs.vsp);
+		// load stack
+		masm.emit_get_curstack(regs.runtime_arg0);
+		// store %sp
+		masm.emit_v3_set_X86_64Stack_rsp_r_r(regs.runtime_arg0, regs.sp);
 		// reload WasmFunction
-		masm.emit_mov_r_m(ValueKind.REF, regs.runtime_arg0, frame.wasm_func_slot);
+		masm.emit_mov_r_m(ValueKind.REF, regs.runtime_arg1, frame.wasm_func_slot);
 		// load PC
-		masm.emit_mov_r_i(regs.runtime_arg1, pc);
+		masm.emit_mov_r_i(regs.runtime_arg2, pc);
 		// call runtime
 		masm.emit_call_runtime_Probe_instr();
 		emit_reload_regs();
-		if (!probeSpillMode.free_regs) state.emitRestoreAll(resolver);
+		if (!spillMode.free_regs) state.emitRestoreAll(resolver);
 	}
 
 	// saves the overhead of using a runtime call by directly invoking the wasm function associated with the whamm probe
@@ -660,8 +673,10 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 		state.emitSaveAll(resolver, SpillMode.SAVE_AND_FREE_REGS);
 		emit_compute_vsp(regs.vsp, state.sp);
 		masm.emit_store_curstack_vsp(regs.vsp);
-		emit_load_instance(regs.runtime_arg0);
-		masm.emit_mov_r_i(regs.runtime_arg1, tag_index);
+		masm.emit_get_curstack(regs.runtime_arg0);
+		masm.emit_v3_set_X86_64Stack_rsp_r_r(regs.runtime_arg0, regs.sp);
+		emit_load_instance(regs.runtime_arg1);
+		masm.emit_mov_r_i(regs.runtime_arg2, tag_index);
 		masm.emit_call_runtime_op(Opcode.THROW);
 		var tag = module.tags[tag_index];
 		dropN(u32.!(tag.fields.length));
@@ -671,7 +686,9 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 		state.emitSaveAll(resolver, SpillMode.SAVE_AND_FREE_REGS);
 		emit_compute_vsp(regs.vsp, state.sp);
 		masm.emit_store_curstack_vsp(regs.vsp);
-		popFixedReg(regs.runtime_arg0);
+		masm.emit_get_curstack(regs.runtime_arg0);
+		masm.emit_v3_set_X86_64Stack_rsp_r_r(regs.runtime_arg0, regs.sp);
+		popFixedReg(regs.runtime_arg1);
 		masm.emit_call_runtime_op(Opcode.THROW_REF);
 		setUnreachable();
 	}
@@ -1106,7 +1123,8 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 		state.push(KIND_I32 | IN_REG, r1, 0);
 	}
 	def visit_MEMORY_GROW(memory_index: u31) {
-		emit_call_runtime_op1(Opcode.MEMORY_GROW, memory_index, false);
+		def is64 = module.memories[memory_index].size.is64;
+		emit_call_runtime_op1n(Opcode.MEMORY_GROW,memory_index, 1, [if(is64, ValueType.I64 ,ValueType.I32)], false);
 	}
 
 	def visit_I32_CONST(val: i32) {
@@ -1259,9 +1277,11 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 		state.emitSaveAll(resolver, runtimeSpillMode);
 		emit_compute_vsp(regs.vsp, state.sp);
 		masm.emit_store_curstack_vsp(regs.vsp);
-		emit_load_instance(regs.runtime_arg0);
-		masm.emit_mov_r_i(regs.runtime_arg1, nullable);
-		masm.emit_mov_r_i(regs.runtime_arg2, ht_val);
+		masm.emit_get_curstack(regs.runtime_arg0);
+		masm.emit_v3_set_X86_64Stack_rsp_r_r(regs.runtime_arg0, regs.sp);
+		emit_load_instance(regs.runtime_arg1);
+		masm.emit_mov_r_i(regs.runtime_arg2, nullable);
+		masm.emit_mov_r_i(regs.runtime_arg3, ht_val);
 		masm.emit_call_runtime_cast();
 		emit_reload_regs();
 		if (!runtimeSpillMode.free_regs) state.emitRestoreAll(resolver);
@@ -1315,7 +1335,7 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 			var result = (sv.const << 1) | 1; // XXX: introduce into Tagging
 			state.overwrite(SpcConsts.KIND_REF | IS_CONST, NO_REG, result);
 		} else {
-			var sv = popReg();
+			var sv = popRegToOverwrite();
 			masm.emit_shld_r_i(sv.reg, 1);
 			masm.emit_binop_r_i(Opcode.I32_OR, sv.reg, 1);
 			state.push(SpcConsts.KIND_REF | IN_REG, sv.reg, 0);
@@ -1387,7 +1407,7 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 	}
 
 	def emit_call_runtime_op1(op: Opcode, arg1: u31, canTrap: bool) {
-		var count = u32.!(op.sig.params.length);
+		var count = u32.!(op.sig.params.length);		
 		emit_call_runtime_op1n(op, arg1, count, op.sig.results, canTrap);
 	}
 	def emit_call_runtime_op2(op: Opcode, arg1: u31, arg2: u31, canTrap: bool) {
@@ -1398,8 +1418,10 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 		state.emitSaveAll(resolver, runtimeSpillMode);
 		emit_compute_vsp(regs.vsp, state.sp);
 		masm.emit_store_curstack_vsp(regs.vsp);
-		emit_load_instance(regs.runtime_arg0);
-		masm.emit_mov_r_i(regs.runtime_arg1, arg1);
+		masm.emit_get_curstack(regs.runtime_arg0);
+		masm.emit_v3_set_X86_64Stack_rsp_r_r(regs.runtime_arg0, regs.sp);
+		emit_load_instance(regs.runtime_arg1);
+		masm.emit_mov_r_i(regs.runtime_arg2, arg1);
 		masm.emit_call_runtime_op(op);
 		dropN(args);
 		for (t in results) state.push(typeToKindFlags(t) | TAG_STORED | IS_STORED, NO_REG, 0);
@@ -1410,9 +1432,11 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 		state.emitSaveAll(resolver, runtimeSpillMode);
 		emit_compute_vsp(regs.vsp, state.sp);
 		masm.emit_store_curstack_vsp(regs.vsp);
-		emit_load_instance(regs.runtime_arg0);
-		masm.emit_mov_r_i(regs.runtime_arg1, arg1);
-		masm.emit_mov_r_i(regs.runtime_arg2, arg2);
+		masm.emit_get_curstack(regs.runtime_arg0);
+		masm.emit_v3_set_X86_64Stack_rsp_r_r(regs.runtime_arg0, regs.sp);
+		emit_load_instance(regs.runtime_arg1);
+		masm.emit_mov_r_i(regs.runtime_arg2, arg1);
+		masm.emit_mov_r_i(regs.runtime_arg3, arg2);
 		masm.emit_call_runtime_op(op);
 		dropN(args);
 		for (t in results) state.push(typeToKindFlags(t) | TAG_STORED | IS_STORED, NO_REG, 0);
@@ -2569,13 +2593,18 @@ def funcCanInline(decl: FuncDecl) -> InlineConfig {
 	while (bi.more()) {
 		var op = bi.current();
 		match (op) {
+			// Cannot handle control flow yet.
 			IF, BR, BR_IF, BR_TABLE, BR_ON_NULL, BR_ON_NON_NULL, BR_ON_CAST, BR_ON_CAST_FAIL, RETURN => return default;
+			// These opcodes require swapping the instance.
 			THROW, CALL, CALL_INDIRECT, MEMORY_INIT, MEMORY_SIZE, MEMORY_GROW, MEMORY_COPY, MEMORY_FILL, REF_FUNC, DATA_DROP,
 			ELEM_DROP, TABLE_INIT, TABLE_SIZE, TABLE_COPY, TABLE_GROW, GLOBAL_SET, GLOBAL_GET, TABLE_SET, TABLE_GET => swap_instance = true;
+			// Load/store opcodes require either the memory base or the instance.
 			I32_STORE, I64_STORE, F32_STORE, F64_STORE, I32_STORE8, I32_STORE16, I64_STORE8, I64_STORE16, I64_STORE32,
 			V128_STORE, I32_LOAD, I64_LOAD, F32_LOAD, F64_LOAD, I32_LOAD8_S, I32_LOAD8_U, I32_LOAD16_S, I32_LOAD16_U,
 			I64_LOAD8_S, I64_LOAD8_U, I64_LOAD16_S, I64_LOAD16_U, I64_LOAD32_S, I64_LOAD32_U, V128_LOAD => {
-				swap_membase = true;
+				var memarg = bi.immptr().read_MemArg();
+				if (memarg.memory_index == 0) swap_membase = true;
+				else swap_instance = true;
 			}
 			_ => ;
 		}

@@ -168,6 +168,19 @@ class CodeValidator(extensions: Extension.set, limits: Limits, module: Module, e
 				checkSignature(opcode.sig);
 				if (Trace.validation) traceStack(false);
 				if (validatingInitExpr && !Opcodes.isConstant(extensions, opcode)) err_atpc().UnexpectedOpcodeInInit(opcode.prefix, opcode.code);
+				if(validatingInitExpr) {
+					def arg2 = init_stack.pop();
+					def arg1 = init_stack.pop();
+					match (opcode) {
+							I32_ADD => init_stack.push(InitExpr.I32_ADD(arg1, arg2));
+							I32_SUB => init_stack.push(InitExpr.I32_SUB(arg1, arg2));
+							I32_MUL => init_stack.push(InitExpr.I32_MUL(arg1, arg2));
+							I64_ADD => init_stack.push(InitExpr.I64_ADD(arg1, arg2));
+							I64_SUB => init_stack.push(InitExpr.I64_SUB(arg1, arg2));
+							I64_MUL => init_stack.push(InitExpr.I64_MUL(arg1, arg2));
+							_ => {}
+					}
+				}
 				continue;
 			}
 			// Handle all other operators in the switch (indirect branch)
@@ -206,7 +219,7 @@ class CodeValidator(extensions: Extension.set, limits: Limits, module: Module, e
 					pushTypes(ctl_top.params);
 				}
 				TRY => {
-					if (!checkExtension(Extension.EXCEPTION_HANDLING, opcode)) return;
+					if (!checkExtension(Extension.LEGACY_EH, opcode)) return;
 					var pr = parser.readBlockType();
 					checkArgsAndPushControl(opcode, pr.0, pr.1);
 					ctl_top.sidetable_pos = ctlxfer.sidetable.length;
@@ -214,7 +227,7 @@ class CodeValidator(extensions: Extension.set, limits: Limits, module: Module, e
 					ctl_top.delegate_pos = opcode_pos + 1;
 				}
 				CATCH => {
-					if (!checkExtension(Extension.EXCEPTION_HANDLING, opcode)) return;
+					if (!checkExtension(Extension.LEGACY_EH, opcode)) return;
 					if (ctl_top.start_opcode != Opcode.TRY.code && ctl_top.start_opcode != Opcode.CATCH.code) {
 						return err_atpc().MismatchedCatch();
 					}
@@ -233,14 +246,14 @@ class CodeValidator(extensions: Extension.set, limits: Limits, module: Module, e
 					val_stack.pusha(tag.fields);
 				}
 				THROW => {
-					if (!checkExtension(Extension.EXCEPTION_HANDLING, opcode)) return;
+					if (!checkExtension(Extension.EXCEPTION_HANDLING | Extension.LEGACY_EH, opcode)) return;
 					var tag = parser.readTagRef();
 					if (tag == null) return;
 					checkAndPopArgs(tag.fields);
 					setUnreachable();
 				}
 				RETHROW => {
-					if (!checkExtension(Extension.EXCEPTION_HANDLING, opcode)) return;
+					if (!checkExtension(Extension.LEGACY_EH, opcode)) return;
 					var depth = parser.readLabel();
 					var target = getControl(depth);
 					var t = findExSlot(target), ex_slot = t.0, found = t.1;
@@ -389,7 +402,7 @@ class CodeValidator(extensions: Extension.set, limits: Limits, module: Module, e
 					setUnreachable();
 				}
 				DELEGATE => {
-					if (!checkExtension(Extension.EXCEPTION_HANDLING, opcode)) return;
+					if (!checkExtension(Extension.LEGACY_EH, opcode)) return;
 					if (ctl_top.start_opcode != Opcode.TRY.code) return err_atpc().MismatchedDelegate();
 					var range = startExHandler();
 					var depth = parser.readLabel();
@@ -404,7 +417,7 @@ class CodeValidator(extensions: Extension.set, limits: Limits, module: Module, e
 					ctl_top = ctl_stack.peek();
 				}
 				CATCH_ALL => {
-					if (!checkExtension(Extension.EXCEPTION_HANDLING, opcode)) return;
+					if (!checkExtension(Extension.LEGACY_EH, opcode)) return;
 					if (ctl_top.start_opcode != Opcode.TRY.code && ctl_top.start_opcode != Opcode.CATCH.code) {
 						return err_atpc().MismatchedCatch();
 					}
@@ -927,8 +940,8 @@ class CodeValidator(extensions: Extension.set, limits: Limits, module: Module, e
 					var dst = parser.readMemoryRef(extensions.MULTI_MEMORY);
 					if (dst == null) return;
 					var it = dst.size.indexType();
-					popE(it);
-					popE(it);
+					popE(ValueType.I32);
+					popE(ValueType.I32);
 					popE(it);
 				}
 				DATA_DROP => {
@@ -977,7 +990,9 @@ class CodeValidator(extensions: Extension.set, limits: Limits, module: Module, e
 					}
 					var dit = dst.size.indexType();
 					var sit = src.size.indexType();
-					popE(sit);
+					// length is minimum of source and destination type
+					var nit = if(dit == ValueType.I32, ValueType.I32, sit);
+					popE(nit);
 					popE(sit);
 					popE(dit);
 				}
@@ -1283,8 +1298,9 @@ class CodeValidator(extensions: Extension.set, limits: Limits, module: Module, e
 		if (p.length > 0) checkAndPopArgs(p);
 		if (r.length > 0) pushTypes(r);
 	}
-	def checkExtension(ext: Extension, opcode: Opcode) -> bool {
-		if (extensions != (extensions | ext)) {
+	def checkExtension(ext: Extension.set, opcode: Opcode) -> bool {
+		var none: Extension.set;
+		if ((extensions & ext) == none) {
 			err_atpc().OpcodeRequiresExtension(opcode, ext);
 			return false;
 		}
