@@ -1,0 +1,45 @@
+// Copyright 2021 Ben L. Titzer. All rights reserved.
+// See LICENSE for details of Apache 2.0 license.
+
+// An instantiated Wasm memory implemented using a Virgil byte array.
+class V3Memory extends Memory {
+	def var data: Array<byte>;
+
+	new(decl: MemoryDecl) super(decl) {
+		var num_pages: u64 = decl.size.initial;
+		var num_bytes: u64 = num_pages << decl.log2_pageSize;
+		if (num_bytes > int.max || num_pages > Target.limit_memory_pages) {
+			oom = true;
+		} else {
+			data = Array<byte>.new(int.!(num_bytes));
+			PrivateMemoryAccess.setSize(this, num_pages, num_bytes);
+		}
+	}
+	def deallocate() {
+		data = null;
+	}
+	def grow(add_pages: u64) -> long {
+		var cur_pages = num_pages;
+		var cur_bytes = num_bytes;
+		if (Trace.memory) {
+			Trace.OUT
+				.put2("grow memory (%d pages) by %d pages", cur_pages, add_pages)
+				.ln();
+		}
+		if (add_pages == 0) return int.!(cur_pages); // degenerate case
+		var new_pages = cur_pages + add_pages;
+		if (new_pages > decl.size.maximum.min(Target.limit_memory_pages)) return -1; // exceeded maximum
+		var add_bytes = u64.view(add_pages) << decl.log2_pageSize;
+		var new_bytes = cur_bytes + add_bytes;
+		// allocate new array and copy old data
+		var new_data = Array<byte>.new(int.!(new_bytes));
+		Target.fastFwCopy(new_data[0 ... num_bytes], data[0 ... num_bytes]);
+		data = new_data;
+		
+		PrivateMemoryAccess.setSize(this, new_pages, new_bytes);
+		return int.view(cur_pages);
+	}
+	def getReadWriteAlias64(start: u64, end: u64) -> Range<byte> {
+		return data[start ... end];
+	}
+}

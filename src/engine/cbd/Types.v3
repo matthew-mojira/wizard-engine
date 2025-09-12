@@ -1,0 +1,34 @@
+// TODO: we should probably use wizard's rep
+class CBDFunction {
+    var code: Array<byte>;
+    def args: Vector<TypeVar> = Vector.new();
+    def rets: Vector<TypeVar> = Vector.new();
+    def locals: Vector<TypeVar> = Vector.new();
+    var sidetable: Sidetable;
+
+    new(decl: FuncDecl) {
+        for (param in decl.sig.params) args.put(value_type_to_type_var(param));
+        for (result in decl.sig.results) rets.put(value_type_to_type_var(result));
+        for (i < decl.num_locals) locals.put(TypeVar.U32); // TODO: no type, gotta parse from body
+        code = decl.orig_bytecode;
+    }
+
+    def value_type_to_type_var(vt: ValueType) -> TypeVar {
+        match (vt) {
+            I32 => return TypeVar.U32;
+            I64 => return TypeVar.U64;
+            F32 => return TypeVar.F32;
+            F64 => return TypeVar.F64;
+            V128 => return TypeVar.V128;
+            Ref => return TypeVar.Object;
+            Host => return TypeVar.Object;
+            BOTTOM => return TypeVar.Bot;
+        }
+    }
+}
+
+class CBDFunctionI extends CBDFunction {
+    var fn_idx: int;
+
+    new(decl: FuncDecl, fn_idx: int) super(decl) {}
+}
