@@ -21,7 +21,7 @@ def push_u32(v: u32.I) : push;
 def push_u64(v: u64.I) : push;
 def push_u64(v: u64.I) : push;
 def push_f32(v: f32.I) : push;
-def push_f64(v: double.I) : push;
+def push_f64(v: f64.I) : push;
 def push_v128(v: v128.I) : push;
 def push_Object(v: Object.I) : push;
 def push_Value(tv: TypeVar.V, v: Value.I) : push;
@@ -181,8 +181,23 @@ def F32_minus(lhs: f32.I, rhs: f32.I) -> f32.I;
 def F32_div(lhs: f32.I, rhs: f32.I) -> f32.I;
 def F32_times(lhs: f32.I, rhs: f32.I) -> f32.I;
 
+def F64_plus(lhs: f64.I, rhs: f64.I) -> f64.I;
+def F64_minus(lhs: f64.I, rhs: f64.I) -> f64.I;
+def F64_times(lhs: f64.I, rhs: f64.I) -> f64.I;
+def F64_div(lhs: f64.I, rhs: f64.I) -> f64.I;
+
 def f32_reinterpret_u32(i: u32.I) -> f32.I;
 def f64_reinterpret_u64(i: u64.I) -> f64.I;
+def U32_wrap_u64(i: u64.I) -> u64.I;
+
+def F32_convert_i32_s(v: u32.I) -> float.I;
+def F32_convert_i32_u(v: u32.I) -> float.I;
+def F32_convert_i64_s(v: u64.I) -> float.I;
+def F32_convert_i64_u(v: u64.I) -> float.I;
+def F64_convert_i32_s(v: u32.I) -> double.I;
+def F64_convert_i32_u(v: u32.I) -> double.I;
+def F64_convert_i64_s(v: u64.I) -> double.I;
+def F64_convert_i64_u(v: u64.I) -> double.I;
 
 def rtcast_u32(i: u32.V) -> u32.I;
 def rtcast_f32(f: f32.V) -> f32.I;
