@@ -70,6 +70,12 @@ def mach_readMemory64_u16(memory_index: u32.V, index: u64.I, offset: u64.V) -> u
 def mach_readMemory32_u16(memory_index: u32.V, index: u32.I, offset: u32.V) -> u32.I;
 def mach_readMemory64_u32(memory_index: u32.V, index: u64.I, offset: u64.V) -> u32.I;
 def mach_readMemory32_u32(memory_index: u32.V, index: u32.I, offset: u32.V) -> u32.I;
+def mach_readMemory64_u8_64(memory_index: u32.V, index: u64.I, offset: u64.V) -> u64.I;
+def mach_readMemory32_u8_64(memory_index: u32.V, index: u32.I, offset: u32.V) -> u64.I;
+def mach_readMemory64_u16_64(memory_index: u32.V, index: u64.I, offset: u64.V) -> u64.I;
+def mach_readMemory32_u16_64(memory_index: u32.V, index: u32.I, offset: u32.V) -> u64.I;
+def mach_readMemory64_u32_64(memory_index: u32.V, index: u64.I, offset: u64.V) -> u64.I;
+def mach_readMemory32_u32_64(memory_index: u32.V, index: u32.I, offset: u32.V) -> u64.I;
 def mach_readMemory64_u64(memory_index: u32.V, index: u64.I, offset: u64.V) -> u64.I;
 def mach_readMemory32_u64(memory_index: u32.V, index: u32.I, offset: u32.V) -> u64.I;
 
@@ -79,10 +85,21 @@ def mach_writeMemory64_u16(memory_index: u32.V, index: u64.I, offset: u64.V, val
 def mach_writeMemory32_u16(memory_index: u32.V, index: u32.I, offset: u32.V, val: u32.I) : memory;
 def mach_writeMemory64_u32(memory_index: u32.V, index: u64.I, offset: u64.V, val: u32.I) : memory;
 def mach_writeMemory32_u32(memory_index: u32.V, index: u32.I, offset: u32.V, val: u32.I) : memory;
+def mach_writeMemory64_u8_64(memory_index: u32.V, index: u64.I, offset: u64.V, val: u64.I) : memory;
+def mach_writeMemory32_u8_64(memory_index: u32.V, index: u32.I, offset: u32.V, val: u64.I) : memory;
+def mach_writeMemory64_u16_64(memory_index: u32.V, index: u64.I, offset: u64.V, val: u64.I) : memory;
+def mach_writeMemory32_u16_64(memory_index: u32.V, index: u32.I, offset: u32.V, val: u64.I) : memory;
+def mach_writeMemory64_u32_64(memory_index: u32.V, index: u64.I, offset: u64.V, val: u64.I) : memory;
+def mach_writeMemory32_u32_64(memory_index: u32.V, index: u32.I, offset: u32.V, val: u64.I) : memory;
 def mach_writeMemory64_u64(memory_index: u32.V, index: u64.I, offset: u64.V, val: u64.I) : memory;
 def mach_writeMemory32_u64(memory_index: u32.V, index: u32.I, offset: u32.V, val: u64.I) : memory;
 def mach_writeMemory64_f64(memory_index: u32.V, index: u64.I, offset: u64.V, val: f64.I) : memory;
 def mach_writeMemory32_f64(memory_index: u32.V, index: u32.I, offset: u32.V, val: f64.I) : memory;
+
+def mach_memorySize32(memory_index: u32.V) -> u32.I;
+def mach_memoryGrow32(memory_index: u32.V, size: u32.I) -> u32.I;
+def mach_memorySize64(memory_index: u32.V) -> u64.I;
+def mach_memoryGrow64(memory_index: u32.V, size: u64.I) -> u64.I;
 
 def mach_readTable64(table_index: u32.V, index: u64.V) -> Object.I;
 def mach_readTable32(table_index: u32.V, index: u32.V) -> Object.I;
@@ -176,15 +193,30 @@ def F32_not_equals(lhs: f32.I, rhs: f32.I) -> u32.I;
 def F32_lt(lhs: f32.I, rhs: f32.I) -> u32.I;
 def F32_lte(lhs: f32.I, rhs: f32.I) -> u32.I;
 def F32_gt(lhs: f32.I, rhs: f32.I) -> u32.I;
+def F32_gte(lhs: f32.I, rhs: f32.I) -> u32.I;
 def F32_plus(lhs: f32.I, rhs: f32.I) -> f32.I;
 def F32_minus(lhs: f32.I, rhs: f32.I) -> f32.I;
 def F32_div(lhs: f32.I, rhs: f32.I) -> f32.I;
 def F32_times(lhs: f32.I, rhs: f32.I) -> f32.I;
+def F32_neg(x: f32.I) -> f32.I;
+def F32_ceil(x: f32.I) -> f32.I;
+def F32_floor(x: f32.I) -> f32.I;
+def F32_trunc(x: f32.I) -> f32.I;
 
+def F64_equals(lhs: f64.I, rhs: f64.I) -> u32.I;
+def F64_not_equals(lhs: f64.I, rhs: f64.I) -> u32.I;
+def F64_lt(lhs: f64.I, rhs: f64.I) -> u32.I;
+def F64_lte(lhs: f64.I, rhs: f64.I) -> u32.I;
+def F64_gt(lhs: f64.I, rhs: f64.I) -> u32.I;
+def F64_gte(lhs: f64.I, rhs: f64.I) -> u32.I;
 def F64_plus(lhs: f64.I, rhs: f64.I) -> f64.I;
 def F64_minus(lhs: f64.I, rhs: f64.I) -> f64.I;
 def F64_times(lhs: f64.I, rhs: f64.I) -> f64.I;
 def F64_div(lhs: f64.I, rhs: f64.I) -> f64.I;
+def F64_neg(x: f64.I) -> f64.I;
+def F64_ceil(x: f64.I) -> f64.I;
+def F64_floor(x: f64.I) -> f64.I;
+def F64_trunc(x: f64.I) -> f64.I;
 
 def f32_reinterpret_u32(i: u32.I) -> f32.I;
 def f64_reinterpret_u64(i: u64.I) -> f64.I;
@@ -198,6 +230,14 @@ def F64_convert_i32_s(v: u32.I) -> double.I;
 def F64_convert_i32_u(v: u32.I) -> double.I;
 def F64_convert_i64_s(v: u64.I) -> double.I;
 def F64_convert_i64_u(v: u64.I) -> double.I;
+def U32_trunc_f32_s(v: float.I) -> u32.I;
+def U32_trunc_f32_u(v: float.I) -> u32.I;
+def U32_trunc_f64_s(v: double.I) -> u32.I;
+def U32_trunc_f64_u(v: double.I) -> u32.I;
+def U64_trunc_f32_s(v: float.I) -> u64.I;
+def U64_trunc_f32_u(v: float.I) -> u64.I;
+def U64_trunc_f64_s(v: double.I) -> u64.I;
+def U64_trunc_f64_u(v: double.I) -> u64.I;
 
 def rtcast_u32(i: u32.V) -> u32.I;
 def rtcast_f32(f: f32.V) -> f32.I;

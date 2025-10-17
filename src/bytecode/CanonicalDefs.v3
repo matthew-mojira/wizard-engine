@@ -58,6 +58,14 @@ def F64_convert_i32_s(v: u32) -> double;
 def F64_convert_i32_u(v: u32) -> double;
 def F64_convert_i64_s(v: u64) -> double;
 def F64_convert_i64_u(v: u64) -> double;
+def U32_trunc_f32_s(v: float) -> u32;
+def U32_trunc_f32_u(v: float) -> u32;
+def U32_trunc_f64_s(v: double) -> u32;
+def U32_trunc_f64_u(v: double) -> u32;
+def U64_trunc_f32_s(v: float) -> u64;
+def U64_trunc_f32_u(v: float) -> u64;
+def U64_trunc_f64_s(v: double) -> u64;
+def U64_trunc_f64_u(v: double) -> u64;
 
 def U32_wrap_u64(v: u64) -> u32;
 
@@ -107,6 +115,20 @@ def U64_rotr(lhs: u64, rhs: u64) -> u64;
 def U64_extend8_s(x: u64) -> u64;
 def U64_extend16_s(x: u64) -> u64;
 def U64_extend32_s(x: u64) -> u64;
+def U64_extend_i32_s(x: u64) -> u64;
+def U64_extend_i32_u(x: u64) -> u64;
+
+// F32 ops.
+def F32_neg(x: float) -> float;
+def F32_ceil(x: float) -> float;
+def F32_floor(x: float) -> float;
+def F32_trunc(x: float) -> float;
+
+// F64 ops.
+def F64_neg(x: double) -> double;
+def F64_ceil(x: double) -> double;
+def F64_floor(x: double) -> double;
+def F64_trunc(x: double) -> double;
 
 // Local variables.
 def getLocal(tv: TypeVar, index: u32) -> Value;
@@ -152,6 +174,12 @@ def mach_readMemory64_u16(memory_index: u32, index: u64, offset: u64) -> u16;
 def mach_readMemory32_u16(memory_index: u32, index: u32, offset: u32) -> u16;
 def mach_readMemory64_u32(memory_index: u32, index: u64, offset: u64) -> u32;
 def mach_readMemory32_u32(memory_index: u32, index: u32, offset: u32) -> u32;
+def mach_readMemory64_u8_64(memory_index: u32, index: u64, offset: u64) -> u8;
+def mach_readMemory32_u8_64(memory_index: u32, index: u32, offset: u32) -> u8;
+def mach_readMemory64_u16_64(memory_index: u32, index: u64, offset: u64) -> u16;
+def mach_readMemory32_u16_64(memory_index: u32, index: u32, offset: u32) -> u16;
+def mach_readMemory64_u32_64(memory_index: u32, index: u64, offset: u64) -> u32;
+def mach_readMemory32_u32_64(memory_index: u32, index: u32, offset: u32) -> u32;
 def mach_readMemory64_u64(memory_index: u32, index: u64, offset: u64) -> u64;
 def mach_readMemory32_u64(memory_index: u32, index: u32, offset: u32) -> u64;
 def mach_readMemory64_f32(memory_index: u32, index: u64, offset: u64) -> float;
@@ -165,6 +193,12 @@ def mach_writeMemory64_u16(memory_index: u32, index: u64, offset: u64, val: u32)
 def mach_writeMemory32_u16(memory_index: u32, index: u32, offset: u32, val: u32);
 def mach_writeMemory64_u32(memory_index: u32, index: u64, offset: u64, val: u32);
 def mach_writeMemory32_u32(memory_index: u32, index: u32, offset: u32, val: u32);
+def mach_writeMemory64_u8_64(memory_index: u32, index: u64, offset: u64, val: u64);
+def mach_writeMemory32_u8_64(memory_index: u32, index: u32, offset: u32, val: u64);
+def mach_writeMemory64_u16_64(memory_index: u32, index: u64, offset: u64, val: u64);
+def mach_writeMemory32_u16_64(memory_index: u32, index: u32, offset: u32, val: u64);
+def mach_writeMemory64_u32_64(memory_index: u32, index: u64, offset: u64, val: u64);
+def mach_writeMemory32_u32_64(memory_index: u32, index: u32, offset: u32, val: u64);
 def mach_writeMemory64_u64(memory_index: u32, index: u64, offset: u64, val: u64);
 def mach_writeMemory32_u64(memory_index: u32, index: u32, offset: u32, val: u64);
 def mach_writeMemory64_f32(memory_index: u32, index: u64, offset: u64, val: float);
@@ -177,6 +211,11 @@ def mach_readTable32(table_index: u32, index: u32) -> Object;
 
 def mach_writeTable64(table_index: u32, index: u64, val: Object);
 def mach_writeTable32(table_index: u32, index: u32, val: Object);
+
+def mach_memorySize32(memory_index: u32) -> u32;
+def mach_memoryGrow32(memory_index: u32, size: u32) -> u32;
+def mach_memorySize64(memory_index: u32) -> u64;
+def mach_memoryGrow64(memory_index: u32, size: u64) -> u64;
 
 def object_Null() -> Object;
 def object_isNull(obj: Object) -> bool;
@@ -461,30 +500,143 @@ def I32_LOAD8_U() {
 		push_u32(val);
 	}
 }
-// def I32_LOAD16_S() {
-// 	var flags = imm_readU8();
-// 	var memindex = 0u;
-// 	if (u8.!=(u8.&(flags, 0x40u8), 0)) memindex = imm_readULEB32();
-// 	if (m_isMemory64(memindex)) {
-// 		var offset = imm_readULEB64();
-// 		var index = pop_u64();
-// 		var val = U32_extend16_s(mach_readMemory64_u16(memindex, index, offset));
-// 		push_u32(val);
-// 	} else {
-// 		var offset = imm_readULEB32();
-// 		var index = pop_u32();
-// 		var val = U32_extend16_s(mach_readMemory32_u16(memindex, index, offset));
-// 		push_u32(val);
-// 	}
-// }
-// missing 0x2F I32_LOAD16_U
+def I32_LOAD16_S() {
+	var flags = imm_readU8();
+	var memindex = 0u;
+	if (u8.!=(u8.&(flags, 0x40u8), 0)) memindex = imm_readULEB32();
+	if (m_isMemory64(memindex)) {
+		var offset = imm_readULEB64();
+		var index = pop_u64();
+		var val = mach_readMemory64_u16(memindex, index, offset);
+		var extend = U32_extend16_s(val);
+		push_u32(extend);
+	} else {
+		var offset = imm_readULEB32();
+		var index = pop_u32();
+		var val = mach_readMemory32_u16(memindex, index, offset);
+		var extend = U32_extend16_s(val);
+		push_u32(extend);
+	}
+}
+def I32_LOAD16_U() {
+	var flags = imm_readU8();
+	var memindex = 0u;
+	if (u8.!=(u8.&(flags, 0x40u8), 0)) memindex = imm_readULEB32();
+	if (m_isMemory64(memindex)) {
+		var offset = imm_readULEB64();
+		var index = pop_u64();
+		var val = mach_readMemory64_u16(memindex, index, offset);
+		push_u32(val);
+	} else {
+		var offset = imm_readULEB32();
+		var index = pop_u32();
+		var val = mach_readMemory32_u16(memindex, index, offset);
+		push_u32(val);
+	}
+}
 // 0x30
-// missing 0x30 I64_LOAD8_S
-// missing 0x31 I64_LOAD8_U
-// missing 0x32 I64_LOAD16_S
-// missing 0x33 I64_LOAD16_U
-// missing 0x34 I64_LOAD32_S
-// missing 0x35 I64_LOAD32_U
+def I64_LOAD8_S() {
+	var flags = imm_readU8();
+	var memindex = 0u;
+	if (u8.!=(u8.&(flags, 0x40u8), 0)) memindex = imm_readULEB32();
+	if (m_isMemory64(memindex)) {
+		var offset = imm_readULEB64();
+		var index = pop_u64();
+                var val = mach_readMemory64_u8_64(memindex, index, offset);
+                var extend = U64_extend8_s(val);
+                push_u64(extend);
+	} else {
+		var offset = imm_readULEB32();
+		var index = pop_u32();		
+                var val = mach_readMemory32_u8_64(memindex, index, offset);
+                var extend = U64_extend8_s(val);
+                push_u64(extend);
+	}
+}
+def I64_LOAD8_U() {
+	var flags = imm_readU8();
+	var memindex = 0u;
+	if (u8.!=(u8.&(flags, 0x40u8), 0)) memindex = imm_readULEB32();
+	if (m_isMemory64(memindex)) {
+		var offset = imm_readULEB64();
+		var index = pop_u64();
+		var val = mach_readMemory64_u8_64(memindex, index, offset);
+		push_u64(val);
+	} else {
+		var offset = imm_readULEB32();
+		var index = pop_u32();
+		var val = mach_readMemory32_u8_64(memindex, index, offset);
+		push_u64(val);
+	}
+}
+def I64_LOAD16_S() {
+	var flags = imm_readU8();
+	var memindex = 0u;
+	if (u8.!=(u8.&(flags, 0x40u8), 0)) memindex = imm_readULEB32();
+	if (m_isMemory64(memindex)) {
+		var offset = imm_readULEB64();
+		var index = pop_u64();
+		var val = mach_readMemory64_u16_64(memindex, index, offset);
+		var extend = U64_extend16_s(val);
+		push_u64(extend);
+	} else {
+		var offset = imm_readULEB32();
+		var index = pop_u32();
+		var val = mach_readMemory32_u16_64(memindex, index, offset);
+		var extend = U64_extend16_s(val);
+		push_u64(extend);
+	}
+}
+def I64_LOAD16_U() {
+	var flags = imm_readU8();
+	var memindex = 0u;
+	if (u8.!=(u8.&(flags, 0x40u8), 0)) memindex = imm_readULEB32();
+	if (m_isMemory64(memindex)) {
+		var offset = imm_readULEB64();
+		var index = pop_u64();
+		var val = mach_readMemory64_u16_64(memindex, index, offset);
+		push_u64(val);
+	} else {
+		var offset = imm_readULEB32();
+		var index = pop_u32();
+		var val = mach_readMemory32_u16_64(memindex, index, offset);
+		push_u64(val);
+	}
+}
+def I64_LOAD32_S() {
+	var flags = imm_readU8();
+	var memindex = 0u;
+	if (u8.!=(u8.&(flags, 0x40u8), 0)) memindex = imm_readULEB32();
+	if (m_isMemory64(memindex)) {
+		var offset = imm_readULEB64();
+		var index = pop_u64();
+		var val = mach_readMemory64_u32_64(memindex, index, offset);
+		var extend = U64_extend32_s(val);
+		push_u64(extend);
+	} else {
+		var offset = imm_readULEB32();
+		var index = pop_u32();
+		var val = mach_readMemory32_u32_64(memindex, index, offset);
+		var extend = U64_extend32_s(val);
+		push_u64(extend);
+	}
+}
+def I64_LOAD32_U() {
+	var flags = imm_readU8();
+	var memindex = 0u;
+	if (u8.!=(u8.&(flags, 0x40u8), 0)) memindex = imm_readULEB32();
+	if (m_isMemory64(memindex)) {
+		var offset = imm_readULEB64();
+		var index = pop_u64();
+		var val = mach_readMemory64_u32_64(memindex, index, offset);
+		push_u64(val);
+	} else {
+		var offset = imm_readULEB32();
+		var index = pop_u32();
+		var val = mach_readMemory32_u32_64(memindex, index, offset);
+		push_u64(val);
+	}
+}
 def I32_STORE() {
     var flags = imm_readU8();
     var memindex = 0u;
@@ -581,12 +733,83 @@ def I32_STORE16() {
 		mach_writeMemory32_u16(memindex, index, offset, val);
 	}
 }
-// missing 0x3C I64_STORE8
-// missing 0x3D I64_STORE16
-// missing 0x3E I64_STORE32
-// missing 0x3F MEMORY_SIZE
+def I64_STORE8() {
+    var flags = imm_readU8();
+    var memindex = 0u;
+	if (u8.!=(u8.&(flags, 0x40u8), 0)) memindex = imm_readULEB32();
+
+        var val = pop_u64();
+	if (m_isMemory64(memindex)) {
+		var offset = imm_readULEB64();
+		var index = pop_u64();
+		mach_writeMemory64_u8_64(memindex, index, offset, val);
+	} else {
+		var offset = imm_readULEB32();
+		var index = pop_u32();
+		mach_writeMemory32_u8_64(memindex, index, offset, val);
+	}
+}
+def I64_STORE16() {
+    var flags = imm_readU8();
+    var memindex = 0u;
+	if (u8.!=(u8.&(flags, 0x40u8), 0)) memindex = imm_readULEB32();
+
+        var val = pop_u64();
+	if (m_isMemory64(memindex)) {
+		var offset = imm_readULEB64();
+		var index = pop_u64();
+		mach_writeMemory64_u16_64(memindex, index, offset, val);
+	} else {
+		var offset = imm_readULEB32();
+		var index = pop_u32();
+		mach_writeMemory32_u16_64(memindex, index, offset, val);
+	}
+}
+def I64_STORE32() {
+    var flags = imm_readU8();
+    var memindex = 0u;
+	if (u8.!=(u8.&(flags, 0x40u8), 0)) memindex = imm_readULEB32();
+
+        var val = pop_u64();
+	if (m_isMemory64(memindex)) {
+		var offset = imm_readULEB64();
+		var index = pop_u64();
+		mach_writeMemory64_u32_64(memindex, index, offset, val);
+	} else {
+		var offset = imm_readULEB32();
+		var index = pop_u32();
+		mach_writeMemory32_u32_64(memindex, index, offset, val);
+	}
+}
+def MEMORY_SIZE() {
+	var flags = imm_readU8();
+	var memindex = 0u;
+	if (u8.!=(u8.&(flags, 0x40u8), 0)) memindex = imm_readULEB32();
+
+	if (m_isMemory64(memindex)) {
+		var r = mach_memorySize64(memindex);
+		push_u64(r);
+	} else {
+		var r = mach_memorySize32(memindex);
+		push_u32(r);
+	}
+}
 // 0x40
-// missing 0x40 MEMORY_GROW
+def MEMORY_GROW() {
+	var flags = imm_readU8();
+	var memindex = 0u;
+	if (u8.!=(u8.&(flags, 0x40u8), 0)) memindex = imm_readULEB32();
+
+	if (m_isMemory64(memindex)) {
+        	var val = pop_u64();
+		var r = mach_memoryGrow64(memindex, val);
+		push_u64(r);
+	} else {
+        	var val = pop_u32();
+		var r = mach_memoryGrow32(memindex, val);
+		push_u32(r);
+	}
+}
 def I32_CONST() {
 	var x = imm_readILEB32();
 	push_u32(x);
@@ -740,13 +963,41 @@ def F32_LE() {
 	else push_u32(0);
 }
 // 0x60
-// missing 0x60 F32_GE
-// missing 0x61 F64_EQ
-// missing 0x62 F64_NE
-// missing 0x63 F64_LT
-// missing 0x64 F64_GT
-// missing 0x65 F64_LE
-// missing 0x66 F64_GE
+def F32_GE() {
+	var b = pop_f32(), a = pop_f32();
+	if (float.>=(a, b)) push_u32(1);
+	else push_u32(0);
+}
+def F64_EQ() {
+	var b = pop_f64(), a = pop_f64();
+	if (double.==(a, b)) push_u32(1);
+	else push_u32(0);
+}
+def F64_NE() {
+	var b = pop_f64(), a = pop_f64();
+	if (double.!=(a, b)) push_u32(1);
+	else push_u32(0);
+}
+def F64_LT() {
+	var b = pop_f64(), a = pop_f64();
+	if (double.<(a, b)) push_u32(1);
+	else push_u32(0);
+}
+def F64_GT() {
+	var b = pop_f64(), a = pop_f64();
+	if (double.>(a, b)) push_u32(1);
+	else push_u32(0);
+}
+def F64_LE() {
+	var b = pop_f64(), a = pop_f64();
+	if (double.<=(a, b)) push_u32(1);
+	else push_u32(0);
+}
+def F64_GE() {
+	var b = pop_f64(), a = pop_f64();
+	if (double.>=(a, b)) push_u32(1);
+	else push_u32(0);
+}
 def I32_CLZ() {
 	var a = pop_u32();
 	var r = U32_clz(a);
@@ -939,17 +1190,41 @@ def I64_ROTR() {
 	var r = U64_rotr(a, b);
 	push_u64(r);
 }
-// missing 0x8B F32_ABS
-// missing 0x8C F32_NEG
-// missing 0x8D F32_CEIL
-// missing 0x8E F32_FLOOR
-// missing 0x8F F32_TRUNC
+def F32_ABS() {
+	var a = pop_f32();
+	var r = float.abs(a);
+	push_f32(r);
+}
+def F32_NEG() {
+	var a = pop_f32();
+	var r = F32_neg(a);
+	push_f32(r);
+}
+def F32_CEIL() {
+	var a = pop_f32();
+	var r = F32_ceil(a);
+	push_f32(r);
+}
+def F32_FLOOR() {
+	var a = pop_f32();
+	var r = F32_floor(a);
+	push_f32(r);
+}
+def F32_TRUNC() {
+	var a = pop_f32();
+	var r = F32_trunc(a);
+	push_f32(r);
+}
 // 0x90
-// missing 0x90 F32_NEAREST
+def F32_NEAREST() {
+	var a = pop_f32();
+	var r = float.round(a);
+	push_f32(r);
+}
 def F32_SQRT() {
 	var a = pop_f32();
-    var r = float.sqrt(a);
-    push_f32(r);
+	var r = float.sqrt(a);
+	push_f32(r);
 }
 def F32_ADD() {
 	var b = pop_f32(), a = pop_f32();
@@ -975,13 +1250,41 @@ def F32_DIV() {
 // missing 0x96 F32_MIN
 // missing 0x97 F32_MAX
 // missing 0x98 F32_COPYSIGN
-// missing 0x99 F64_ABS
-// missing 0x9A F64_NEG
-// missing 0x9B F64_CEIL
-// missing 0x9C F64_FLOOR
-// missing 0x9D F64_TRUNC
-// missing 0x9E F64_NEAREST
-// missing 0x9F F64_SQRT
+def F64_ABS() {
+	var a = pop_f64();
+	var r = double.abs(a);
+	push_f64(r);
+}
+def F64_NEG() {
+	var a = pop_f64();
+	var r = F64_neg(a);
+	push_f64(r);
+}
+def F64_CEIL() {
+	var a = pop_f64();
+	var r = F64_ceil(a);
+	push_f64(r);
+}
+def F64_FLOOR() {
+	var a = pop_f64();
+	var r = F64_floor(a);
+	push_f64(r);
+}
+def F64_TRUNC() {
+	var a = pop_f64();
+	var r = F64_trunc(a);
+	push_f64(r);
+}
+def F64_NEAREST() {
+	var a = pop_f64();
+	var r = double.round(a);
+	push_f64(r);
+}
+def F64_SQRT() {
+	var a = pop_f64();
+	var r = double.sqrt(a);
+	push_f64(r);
+}
 // 0xA0
 def F64_ADD() {
 	var b = pop_f64(), a = pop_f64();
@@ -1012,21 +1315,57 @@ def I32_WRAP_I64() {
 	var r = U32_wrap_u64(a);
 	push_u32(r);
 }
-// missing 0xA8 I32_TRUNC_F32_S
-// missing 0xA9 I32_TRUNC_F32_U
-// missing 0xAA I32_TRUNC_F64_S
-// missing 0xAB I32_TRUNC_F64_U
-def I64_EXTEND32_S() {
-	var a = pop_u64();
-	var r = U64_extend32_s(a);
+def I32_TRUNC_F32_S() {
+	var a = pop_f32();
+	var r = U32_trunc_f32_s(a);
+	push_u32(r);
+}
+def I32_TRUNC_F32_U() {
+	var a = pop_f32();
+	var r = U32_trunc_f32_u(a);
+	push_u32(r);
+}
+def I32_TRUNC_F64_S() {
+	var a = pop_f64();
+	var r = U32_trunc_f64_s(a);
+	push_u32(r);
+}
+def I32_TRUNC_F64_U() {
+	var a = pop_f64();
+	var r = U32_trunc_f64_u(a);
+	push_u32(r);
+}
+def I64_EXTEND_I32_S() {
+	var a = pop_u32();
+	var r = U64_extend_i32_s(a);
 	push_u64(r);
 }
-// missing 0xAD I32_EXTEND32_U
-// missing 0xAE I64_TRUNC_F32_S
-// missing 0xAF I64_TRUNC_F32_U
+def I64_EXTEND_I32_U() {
+	var a = pop_u32();
+	var r = U64_extend_i32_u(a);
+	push_u64(r);
+}
+def I64_TRUNC_F32_S() {
+	var a = pop_f32();
+	var r = U64_trunc_f32_s(a);
+	push_u64(r);
+}
+def I64_TRUNC_F32_U() {
+	var a = pop_f32();
+	var r = U64_trunc_f32_u(a);
+	push_u64(r);
+}
 // 0xB0
-// missing 0xB0 I64_TRUNC_F64_S
-// missing 0xB1 I64_TRUNC_F64_U
+def I64_TRUNC_F64_S() {
+	var a = pop_f64();
+	var r = U64_trunc_f64_s(a);
+	push_u64(r);
+}
+def I64_TRUNC_F64_U() {
+	var a = pop_f64();
+	var r = U64_trunc_f64_u(a);
+	push_u64(r);
+}
 def F32_CONVERT_I32_S() {
 	var b = pop_u32();
 	var r = F32_convert_i32_s(b);
@@ -1069,10 +1408,26 @@ def F64_CONVERT_I64_U() {
 	push_f64(r);
 }
 // missing 0xBB F64_PROMOTE_F32
-// missing 0xBC I32_REINTERPRET_F32 
-// missing 0xBD I32_REINTERPRET_F64
-// missing 0xBE F64_REINTERPRET_I32
-// missing 0xBF F64_REINTERPRET_I64
+def I32_REINTERPRET_F32() {
+	var a = pop_f32();
+	var r = u32_reinterpret_f32(a);
+	push_u32(r);
+}
+def I64_REINTERPRET_F64() {
+	var a = pop_f64();
+	var r = u64_reinterpret_f64(a);
+	push_u64(r);
+}
+def F32_REINTERPRET_I32() {
+	var a = pop_u32();
+	var r = f32_reinterpret_u32(a);
+	push_f32(r);
+}
+def F64_REINTERPRET_I64() {
+	var a = pop_u64();
+	var r = f64_reinterpret_u64(a);
+	push_f64(r);
+}
 // 0xC0
 def I32_EXTEND8_S() {
 	var a = pop_u32();
@@ -1094,7 +1449,11 @@ def I64_EXTEND16_S() {
 	var r = U64_extend16_s(a);
 	push_u64(r);
 }
-// missing 0xC3 I64_EXTEND32_S
+def I64_EXTEND32_S() {
+	var a = pop_u64();
+	var r = U64_extend32_s(a);
+	push_u64(r);
+}
 // 0xD0
 def REF_NULL() {
     def idx = imm_readULEB32();
