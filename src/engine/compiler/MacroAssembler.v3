@@ -432,6 +432,8 @@ class MacroAssembler(valuerep: Tagging, regConfig: RegConfig) {
 			REF_NONNULL		=> return MasmBrCond.REF_NULL;
 			IS_WASM_FUNC		=> return MasmBrCond.IS_NOT_WASM_FUNC;
 			IS_NOT_WASM_FUNC	=> return MasmBrCond.IS_WASM_FUNC;
+			LEB_CONT		=> return MasmBrCond.LEB_NOT_CONT;
+			LEB_NOT_CONT		=> return MasmBrCond.LEB_CONT;
 		}
 	}
 
@@ -451,5 +453,7 @@ enum MasmBrCond		(zero: bool, 	i32: bool) {
 	REF_NULL	(true,		false),
 	REF_NONNULL	(false,		false),
 	IS_WASM_FUNC	(true,		false),
-	IS_NOT_WASM_FUNC(false,		false)
+	IS_NOT_WASM_FUNC(false,		false),
+	LEB_CONT	(false,		true),
+	LEB_NOT_CONT	(true,		true)
 }

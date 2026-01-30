@@ -673,12 +673,12 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		});
 
 		// gen: if(num != 0) do
-	var start2 = masm.newLabel(-1);
-	var done2 = masm.newLabel(-1); // XXX this label is never bound
-	masm.emit_breq_r_i(numGpr, 0, done2); // XXX emits far
-	masm.bindLabel(start2);
-	genTagPushR(xenv.tmp2 /* XXX typeGpr */);			// *(sp) = type
-	masm.emit_mov_m_l(vsph[0].value, 0);	// *(sp + 8) = 0
+		var start2 = masm.newLabel(-1);
+		var done2 = masm.newLabel(-1); // XXX this label is never bound
+		masm.emit_breq_r_i(numGpr, 0, done2); // XXX emits far
+		masm.bindLabel(start2);
+		genTagPushR(xenv.tmp2 /* XXX typeGpr */);			// *(sp) = type
+		masm.emit_mov_m_l(vsph[0].value, 0);	// *(sp + 8) = 0
 		incrementVsp();	// sp += 1 slot
 		// gen: while (--num != 0)
 		masm.emit_dec_jnz(numGpr, start2);

@@ -855,6 +855,9 @@ class X86_64MacroAssembler extends MacroAssembler {
 			I1_ZERO, I1_ONE => {
 				asm.d.test_r_i(G(reg), 1);
 			}
+			LEB_CONT, LEB_NOT_CONT => {
+				asm.d.test_r_i(G(reg), 0x80);
+			}
 			_ => {
 				(if(cond.i32, asm.d, asm.q)).cmp_r_i(G(reg), 0);
 			}
