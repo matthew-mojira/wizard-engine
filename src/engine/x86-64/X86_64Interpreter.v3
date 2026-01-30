@@ -1603,20 +1603,20 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 	def genCompares() {
 		// 32-bit integer compares
 		for (t in [
-			(Opcode.I32_EQ, C.Z),
-			(Opcode.I32_NE, C.NZ),
-			(Opcode.I32_LT_S, C.L),
-			(Opcode.I32_LT_U, C.C),
-			(Opcode.I32_GT_S, C.G),
-			(Opcode.I32_GT_U, C.A),
-			(Opcode.I32_LE_S, C.LE),
-			(Opcode.I32_LE_U, C.NA),
-			(Opcode.I32_GE_S, C.GE),
-			(Opcode.I32_GE_U, C.NC)
+			Opcode.I32_EQ,
+			Opcode.I32_NE,
+			Opcode.I32_LT_S,
+			Opcode.I32_LT_U,
+			Opcode.I32_GT_S,
+			Opcode.I32_GT_U,
+			Opcode.I32_LE_S,
+			Opcode.I32_LE_U,
+			Opcode.I32_GE_S,
+			Opcode.I32_GE_U
 		]) {
-			bindHandler(t.0);
+			bindHandler(t);
 			masm.emit_mov_r_m(ValueKind.I32, xenv.tmp0, vsph[-1].value);
-			masm.emit_cmpd_m_r(t.1, vsph[-2].value, xenv.tmp0);
+			masm.emit_binop_m_r(t, vsph[-2].value, xenv.tmp0);
 			masm.emit_mov_m_r(ValueKind.I32, vsph[-2].value, xenv.tmp0);
 			decrementVsp();
 			endHandler();
@@ -1624,20 +1624,20 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		// 64-bit integer compares
 		bindHandler(Opcode.REF_EQ); // share handler with I64_EQ
 		for (t in [
-			(Opcode.I64_EQ, C.Z),
-			(Opcode.I64_NE, C.NZ),
-			(Opcode.I64_LT_S, C.L),
-			(Opcode.I64_LT_U, C.C),
-			(Opcode.I64_GT_S, C.G),
-			(Opcode.I64_GT_U, C.A),
-			(Opcode.I64_LE_S, C.LE),
-			(Opcode.I64_LE_U, C.NA),
-			(Opcode.I64_GE_S, C.GE),
-			(Opcode.I64_GE_U, C.NC)
+			Opcode.I64_EQ,
+			Opcode.I64_NE,
+			Opcode.I64_LT_S,
+			Opcode.I64_LT_U,
+			Opcode.I64_GT_S,
+			Opcode.I64_GT_U,
+			Opcode.I64_LE_S,
+			Opcode.I64_LE_U,
+			Opcode.I64_GE_S,
+			Opcode.I64_GE_U
 		]) {
-			bindHandler(t.0);
+			bindHandler(t);
 			masm.emit_mov_r_m(ValueKind.I64, xenv.tmp0, vsph[-1].value);
-			masm.emit_cmpq_m_r(t.1, vsph[-2].value, xenv.tmp0);
+			masm.emit_binop_m_r(t, vsph[-2].value, xenv.tmp0);
 			masm.emit_mov_m_r(ValueKind.I64, vsph[-2].value, xenv.tmp0);
 			if (valuerep.tagged) masm.emit_mov_m_l(vsph[-2].tag, BpTypeCode.I32.code); // XXX check this
 			decrementVsp();

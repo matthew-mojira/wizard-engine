@@ -524,6 +524,7 @@ class X86_64MacroAssembler extends MacroAssembler {
 		}
 	}
 	def emit_binop_m_r(op: Opcode, ma: MasmAddr, reg: Reg) {
+		var p: (bool, X86_64Assembler, X86_64Cond);
 		match (op) {
 			I32_ADD => asm.d.add_m_r(A(ma), G(reg));
 			I32_SUB => asm.d.sub_m_r(A(ma), G(reg));
@@ -535,7 +536,33 @@ class X86_64MacroAssembler extends MacroAssembler {
 			I64_AND => asm.q.and_m_r(A(ma), G(reg));
 			I64_OR => asm.q.or_m_r(A(ma), G(reg));
 			I64_XOR => asm.q.xor_m_r(A(ma), G(reg));
+			I32_EQ   => p = (true, asm.d, C.Z);
+			I32_NE   => p = (true, asm.d, C.NZ);
+			I32_LT_S => p = (true, asm.d, C.L);
+			I32_LT_U => p = (true, asm.d, C.C);
+			I32_GT_S => p = (true, asm.d, C.G);
+			I32_GT_U => p = (true, asm.d, C.A);
+			I32_LE_S => p = (true, asm.d, C.LE);
+			I32_LE_U => p = (true, asm.d, C.NA);
+			I32_GE_S => p = (true, asm.d, C.GE);
+			I32_GE_U => p = (true, asm.d, C.NC);
+			I64_EQ   => p = (true, asm.q, C.Z);
+			I64_NE   => p = (true, asm.q, C.NZ);
+			I64_LT_S => p = (true, asm.q, C.L);
+			I64_LT_U => p = (true, asm.q, C.C);
+			I64_GT_S => p = (true, asm.q, C.G);
+			I64_GT_U => p = (true, asm.q, C.A);
+			I64_LE_S => p = (true, asm.q, C.LE);
+			I64_LE_U => p = (true, asm.q, C.NA);
+			I64_GE_S => p = (true, asm.q, C.GE);
+			I64_GE_U => p = (true, asm.q, C.NC);
 			_ => unimplemented();
+		}
+		if (p.0) {
+			// XXX result is stored in the register
+			p.1.cmp_m_r(A(ma), G(reg));
+			asm.set_r(p.2, G(reg));
+			p.1.movbzx_r_r(G(reg), G(reg));
 		}
 	}
 	def emit_binop_r_i(op: Opcode, reg: Reg, val: int) {
@@ -619,12 +646,6 @@ class X86_64MacroAssembler extends MacroAssembler {
 		asm.q.cmp_m_r(A(addr), r1);
 		asm.set_r(cond, r1);
 		asm.q.movbzx_r_r(r1, r1);
-	}
-	def emit_cmpd_m_r(cond: X86_64Cond, addr: MasmAddr, reg: Reg) {
-		def r1 = G(reg);
-		asm.d.cmp_m_r(A(addr), r1);
-		asm.set_r(cond, r1);
-		asm.d.movbzx_r_r(r1, r1);
 	}
 	// TODO migrate into above later based on uses (as br_r)
 	def emit_cmpd_m_i(addr: MasmAddr, val: int) {
