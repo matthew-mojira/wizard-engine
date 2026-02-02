@@ -882,6 +882,73 @@ class X86_64MacroAssembler extends MacroAssembler {
 		asm.d.cmp_r_i(G(r), val);
 		asm.jc_rel_far(X86_64Conds.NZ, X86_64MasmLabel.!(label).label);
 	}
+	def emit_brne_r_l(r: Reg, val: int, label: MasmLabel) {
+		asm.q.cmp_r_i(G(r), val);
+		asm.jc_rel_far(X86_64Conds.NZ, X86_64MasmLabel.!(label).label);
+	}
+	/* conditional branch on a Wasm comparison opcode */
+	def emit_br_binop_r_r(op: Opcode, reg1: Reg, reg2: Reg, label: MasmLabel) {
+		var p: (bool, X86_64Assembler, X86_64Cond);
+		match (op) {
+			// we could add other opcodes and dispatch on nonzero
+			I32_EQ   => p = (true, asm.d, C.Z);
+			I32_NE   => p = (true, asm.d, C.NZ);
+			I32_LT_S => p = (true, asm.d, C.L);
+			I32_LT_U => p = (true, asm.d, C.C);
+			I32_GT_S => p = (true, asm.d, C.G);
+			I32_GT_U => p = (true, asm.d, C.A);
+			I32_LE_S => p = (true, asm.d, C.LE);
+			I32_LE_U => p = (true, asm.d, C.NA);
+			I32_GE_S => p = (true, asm.d, C.GE);
+			I32_GE_U => p = (true, asm.d, C.NC);
+			I64_EQ   => p = (true, asm.q, C.Z);
+			I64_NE   => p = (true, asm.q, C.NZ);
+			I64_LT_S => p = (true, asm.q, C.L);
+			I64_LT_U => p = (true, asm.q, C.C);
+			I64_GT_S => p = (true, asm.q, C.G);
+			I64_GT_U => p = (true, asm.q, C.A);
+			I64_LE_S => p = (true, asm.q, C.LE);
+			I64_LE_U => p = (true, asm.q, C.NA);
+			I64_GE_S => p = (true, asm.q, C.GE);
+			I64_GE_U => p = (true, asm.q, C.NC);
+			_ => unimplemented();
+		}
+		if (p.0) {
+			p.1.cmp_r_r(G(reg1), G(reg2));
+			p.1.jc_rel_far(p.2, X86_64MasmLabel.!(label).label);
+		}
+	}
+	def emit_br_binop_r_i(op: Opcode, reg: Reg, imm: int, label: MasmLabel) {
+		var p: (bool, X86_64Assembler, X86_64Cond);
+		match (op) {
+			// we could add other opcodes and dispatch on nonzero
+			I32_EQ   => p = (true, asm.d, C.Z);
+			I32_NE   => p = (true, asm.d, C.NZ);
+			I32_LT_S => p = (true, asm.d, C.L);
+			I32_LT_U => p = (true, asm.d, C.C);
+			I32_GT_S => p = (true, asm.d, C.G);
+			I32_GT_U => p = (true, asm.d, C.A);
+			I32_LE_S => p = (true, asm.d, C.LE);
+			I32_LE_U => p = (true, asm.d, C.NA);
+			I32_GE_S => p = (true, asm.d, C.GE);
+			I32_GE_U => p = (true, asm.d, C.NC);
+			I64_EQ   => p = (true, asm.q, C.Z);
+			I64_NE   => p = (true, asm.q, C.NZ);
+			I64_LT_S => p = (true, asm.q, C.L);
+			I64_LT_U => p = (true, asm.q, C.C);
+			I64_GT_S => p = (true, asm.q, C.G);
+			I64_GT_U => p = (true, asm.q, C.A);
+			I64_LE_S => p = (true, asm.q, C.LE);
+			I64_LE_U => p = (true, asm.q, C.NA);
+			I64_GE_S => p = (true, asm.q, C.GE);
+			I64_GE_U => p = (true, asm.q, C.NC);
+			_ => unimplemented();
+		}
+		if (p.0) {
+			p.1.cmp_r_i(G(reg), imm);
+			p.1.jc_rel_far(p.2, X86_64MasmLabel.!(label).label);
+		}
+	}
 	def emit_br_table_r(reg: Reg, labels: Array<MasmLabel>) {
 		// XXX: simplify the label patching logic by improving X86_64Assembler
 		var r1 = G(reg);
@@ -903,6 +970,10 @@ class X86_64MacroAssembler extends MacroAssembler {
 	def emit_dec_jnz(r: Reg, label: MasmLabel) {
 		asm.d.dec_r(G(r)); // XXX d
 		asm.jc_rel_near(C.NZ, getLabel(label)); // near
+	}
+	def emit_dec_js(r: Reg, label: MasmLabel) {
+		asm.d.dec_r(G(r)); // XXX d
+		asm.jc_rel_near(C.S, getLabel(label)); // near
 	}
 	def emit_call_abs(abs: Pointer) {
 		// XXX: direct (relative) call if start is known and displacement is 32-bit.
