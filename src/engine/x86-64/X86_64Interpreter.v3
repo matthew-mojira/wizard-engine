@@ -1041,8 +1041,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		var valcount = r_tmp1;
 		// if popcount > 0
 		asm.movd_r_m(popcount, r_stp.plus(Sidetable_BrEntry.popcount.offset));
-		asm.d.cmp_r_i(popcount, 0);
-		asm.jc_rel_near(C.Z, ctl_xfer_nostack.label);
+		masm.emit_br_r(xenv.tmp0 /* popcount */, MasmBrCond.I32_ZERO, ctl_xfer_nostack);
 		// load valcount
 		asm.movd_r_m(valcount, r_stp.plus(Sidetable_BrEntry.valcount.offset));
 		// popcount = popcount * SLOT_SIZE
@@ -1055,8 +1054,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		// while(valcount-- >= 0) { [vsp] = [vsp + popcount]; vsp++; }
 		var loop = masm.newLabel(-1);
 		masm.bindLabel(loop);
-		asm.d.dec_r(valcount);
-		asm.jc_rel_near(C.S, ctl_xfer_nostack.label);
+		masm.emit_dec_js(xenv.tmp1 /* valcount */, ctl_xfer_nostack);
 		genCopySlot(r_vsp.plus(0), r_vsp.plusR(popcount, 1, 0));
 		incrementVsp();
 		masm.emit_br(loop);
@@ -1090,12 +1088,11 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		asm.movd_r_m(max, r_stp.plus(Sidetable_BrEntry.pc_delta.offset));
 		decrementVsp();
 		masm.emit_mov_r_m(ValueKind.I32, xenv.tmp1 /* key */, vsph[0].value);
-		asm.d.cmp_r_r(key, max);
-		var ok = X86_64Label.new();
-		asm.jc_rel_near(C.NC, ok);
+		var ok = masm.newLabel(-1);
+		masm.emit_br_binop_r_r(Opcode.I32_GE_U, xenv.tmp1/*key*/, xenv.tmp0/*max*/, ok);
 		asm.d.inc_r(key);
 		asm.movd_r_r(max, key);
-		asm.bind(ok);
+		masm.bindLabel(ok);
 		asm.q.add_r_r(r_ip, max);
 		asm.shl_r_i(max, u6.!(Ints.log(u32.!(Sidetable_BrEntry.size))));
 		asm.q.add_r_r(r_stp, max);
@@ -1135,25 +1132,23 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		}
 		bindHandler(Opcode.SELECT_T); {
 			genReadUleb32(r_tmp0); // load # values
-			var skip = X86_64Label.new();
+			var skip = masm.newLabel(-1);
 			asm.movd_r_r(r_tmp1, r_tmp0);
-			asm.bind(skip);  // skip value types
+			masm.bindLabel(skip);  // skip value types
 			genSkipValueType(r_tmp2, r_tmp3);
-			asm.dec_r(r_tmp1);
-			asm.jc_rel_near(C.NZ, skip);
+			masm.emit_dec_jnz(xenv.tmp1, skip);
 
 			asm.d.shl_r_i(r_tmp0, valuerep.slot_size_log);
 			masm.emit_mov_r_m(ValueKind.I32, xenv.tmp1, vsph[-1].value);
 			asm.sub_r_r(r_vsp, r_tmp0);
 			decrementVsp(); // XXX: combine with above using lea
-			asm.d.cmp_r_i(r_tmp1, 0);
-			var label = X86_64Label.new();
-			asm.jc_rel_near(C.NZ, label);
+			var label = masm.newLabel(-1);
+			masm.emit_br_r(xenv.tmp1, MasmBrCond.I32_NONZERO, label);
 			// false case; copy false values down
 			asm.movq_r_r(r_tmp1, r_vsp);
 			asm.q.sub_r_r(r_tmp1, r_tmp0);
-			var copy = X86_64Label.new();
-			asm.bind(copy);
+			var copy = masm.newLabel(-1);
+			masm.bindLabel(copy);
 			if (valuerep.value_size == 16) {
 				asm.movdqu_s_m(r_xmm0, r_vsp.plusR(r_tmp0, 1, - valuerep.value_size));
 				asm.movdqu_m_s(r_tmp1.plusR(r_tmp0, 1, - valuerep.value_size), r_xmm0);
@@ -1162,9 +1157,9 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 				asm.movq_m_r(r_tmp1.plusR(r_tmp0, 1, - Pointer.SIZE), r_tmp2);
 			}
 			asm.d.sub_r_i(r_tmp0, valuerep.slot_size);
-			asm.jc_rel_near(C.NZ, copy);
+			asm.jc_rel_near(C.NZ, copy.label);
 			// true case, nothing to do
-			asm.bind(label);
+			masm.bindLabel(label);
 			endHandler();
 		}
 		bindHandler(Opcode.TRY_TABLE); { // XXX: speed up with sidetable entry to skip immediates?
@@ -1174,10 +1169,9 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			asm.movd_r_r(r_tmp1, countGpr);
 			asm.imul_r_i(r_tmp1, Sidetable_CatchEntry.size);
 			asm.q.add_r_r(r_stp, r_tmp1);   // adjust sidetable pointer
-			var start = masm.newLabel(-1), done = X86_64Label.new(), catch_all = X86_64Label.new();
+			var start = masm.newLabel(-1), done = masm.newLabel(-1), catch_all = X86_64Label.new();
 			masm.bindLabel(start);
-			asm.d.dec_r(countGpr);		// while (--count >= 0) {
-			asm.jc_rel_near(C.S, done);
+			masm.emit_dec_js(xenv.tmp0/*countGpr*/, done); // while (--count >= 0) {
 			asm.movb_r_m(kindGpr, ip_ptr);	//  kind = *rip++;
 			asm.inc_r(r_ip);
 			genSkipLeb();			//  skip LEB (tag or label)
@@ -1186,7 +1180,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			genSkipLeb();			//  skip label
 			asm.bind(catch_all);
 			masm.emit_br(start);
-			asm.bind(done);
+			masm.bindLabel(done);
 			endHandler();
 		}
 		bindHandler(Opcode.THROW); {
@@ -1275,22 +1269,22 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 	}
 	def genCallsAndRet() {
 		bindHandler(Opcode.END);
-		var returnLabel = X86_64Label.new();
-		asm.q.cmp_r_r(r_ip, r_eip);
+		var returnLabel = masm.newLabel(-1);
 		if (FastIntTuning.threadedDispatch) {
 			// jump over inlined dispatch
-			asm.jc_rel_near(C.GE, returnLabel);
+			masm.emit_br_binop_r_r(Opcode.I64_GE_S, xenv.ip, xenv.eip, returnLabel);
 			genDispatch();
 		} else {
 			// jump to first dispatch
+			asm.q.cmp_r_r(r_ip, r_eip);
 			asm.jc_rel(C.L, firstDispatchOffset - w.pos); // jump to dispatch (loop)
 			// fall through to return bytecode
 		}
 
-		var callFunction = X86_64Label.new();
+		var callFunction = masm.newLabel(-1);
 		var func_arg = r_func_arg;
 		bindHandlerNoAlign(Opcode.RETURN); {
-			asm.bind(returnLabel);
+			masm.bindLabel(returnLabel);
 			// Copy return values from stack to overwrite locals
 			var cnt = r_tmp0;
 			asm.movq_r_m(cnt, r_func_decl.plus(offsets.FuncDecl_sig));
@@ -1309,7 +1303,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			asm.movq_r_m(func_arg, r_tmp0.plusR(r_tmp1, offsets.REF_SIZE, offsets.Array_contents));
 
 			// call_indirect jumps here
-			asm.bind(callFunction);
+			masm.bindLabel(callFunction);
 			computePcFromCurIp();
 			saveCallerIVars();
 			var call_host = masm.newLabel(-1);
@@ -1336,7 +1330,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		}
 
 		bindHandler(Opcode.CALL_INDIRECT); {
-			genCallIndirect(callFunction);
+			genCallIndirect(callFunction.label);
 		}
 
 		bindHandler(Opcode.CALL_REF); {
@@ -1344,8 +1338,9 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			genSkipLeb(); // skip signature index
 			decrementVsp();
 			masm.emit_mov_r_m(ValueKind.REF, xenv.func_arg, vsph[0].value);
+			//masm.emit_breq_r_l(xenv.func_arg, 0, callFunction);
 			asm.q.cmp_r_i(func_arg, 0);
-			asm.jc_rel_near(X86_64Conds.NZ, callFunction);
+			asm.jc_rel_near(X86_64Conds.NZ, callFunction.label);
 			asm.jmp_rel_far(newTrapLabel(TrapReason.NULL_DEREF));
 		}
 
@@ -1467,7 +1462,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			(Opcode.GLOBAL_SET, refRuntimeCall(RT.GLOBAL_SET))
 		]) {
 			bindHandler(t.0);
-			var runtime_call = X86_64Label.new();
+			var runtime_call = masm.newLabel(-1);
 			genReadUleb32(r_tmp0);
 			if (FastIntTuning.inlineGlobalAccess) {
 				// Load instance.globals
@@ -1478,10 +1473,8 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 				// Load Global.tag
 				asm.movbzx_r_m(r_tmp1, r_global.plus(offsets.Global_tag));
 				// check if tag is reference, which cannot be done inline because of i31
-				asm.d.cmp_r_i(r_tmp1, ValueKind.REF.code);
-				asm.jc_rel_near(C.Z, runtime_call);
-				asm.d.cmp_r_i(r_tmp1, ValueKind.REF_U64.code);
-				asm.jc_rel_near(C.Z, runtime_call);
+				masm.emit_breq_r_i(xenv.tmp1, ValueKind.REF.code, runtime_call);
+				masm.emit_breq_r_i(xenv.tmp1, ValueKind.REF_U64.code, runtime_call);
 				// do inline global get or set
 				if (t.0 == Opcode.GLOBAL_GET) {
 					genTagPushR(xenv.tmp1); // set the tag
@@ -1505,7 +1498,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 				}
 				genDispatchOrJumpToDispatch();
 			}
-			asm.bind(runtime_call);
+			masm.bindLabel(runtime_call);
 			masm.emit_get_curstack(xenv.tmp1);
 			saveCallerIVars();
 			callRuntime(t.1, [r_tmp1, r_instance, r_tmp0], false);
@@ -3455,7 +3448,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 
 
 		bindHandler(Opcode.I8X16_SHUFFLE); {
-			var RHS = X86_64Label.new(), LOOP_PRO = X86_64Label.new(), LOOP_EPI = X86_64Label.new();
+			var RHS = masm.newLabel(-1), LOOP_PRO = masm.newLabel(-1), LOOP_EPI = masm.newLabel(-1);
 			incrementVsp(); // make room for a local variable dst (the result)
 			def dst = A(vsph[-1].value);
 			def dst_addr = r_tmp3;
@@ -3470,30 +3463,28 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			// for (i: byte < 16)
 			asm.movq_r_i(i, 0);
 			// LOOP_PROLOGUE:
-			asm.bind(LOOP_PRO);
+			masm.bindLabel(LOOP_PRO);
 			load_imm8(idx);
-			asm.q.cmp_r_i(idx, SIMD_128_SIZE); // idx >= SIMD_128_SIZE?
-			asm.jc_rel_near(C.GE, RHS); // if so, jump to RHS
+			masm.emit_br_binop_r_i(Opcode.I64_GE_S, xenv.tmp0/*idx*/, SIMD_128_SIZE, RHS); // if so, jump to RHS
 			// Load from lhs
 			asm.q.lea(val_addr, lhs);
 			// LOOP_EPILOGUE:
-			asm.bind(LOOP_EPI);
+			masm.bindLabel(LOOP_EPI);
 			asm.movb_r_m(idx, X86_64Addr.new(val_addr, idx, 1, 0)); // load value to idx, since the index is no longer needed
 			asm.movb_m_r(X86_64Addr.new(dst_addr, i, 1, 0), idx); // store value to dst
 			asm.inc_r(i);
-			asm.q.cmp_r_i(i, SIMD_128_SIZE); // loop when 0 <= i < 16
-			asm.jc_rel_near(C.L, LOOP_PRO);
+			masm.emit_br_binop_r_i(Opcode.I64_LT_S, xenv.tmp2/*i*/, SIMD_128_SIZE, LOOP_PRO); // loop when 0 <= i < 16
 			// Return
 			masm.emit_mov_r_m(ValueKind.V128, xenv.xmm0, vsph[-1].value);
 			masm.emit_mov_m_r(ValueKind.V128, vsph[-3].value, xenv.xmm0);
 			adjustVsp(-2);
 			endHandler();
 			// RHS:
-			asm.bind(RHS);
+			masm.bindLabel(RHS);
 			// Load from rhs
 			asm.q.sub_r_i(idx, SIMD_128_SIZE); // idx -= 16
 			asm.q.lea(val_addr, rhs);
-			asm.jmp_rel_near(LOOP_EPI);
+			masm.emit_br(LOOP_EPI);
 		}
 		bindHandler(Opcode.I8X16_SWIZZLE);
 		bindHandler(Opcode.I8X16_RELAXED_SWIZZLE); { // XXX: faster swizzle available?
