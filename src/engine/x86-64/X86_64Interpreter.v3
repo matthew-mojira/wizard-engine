@@ -1330,7 +1330,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		}
 
 		bindHandler(Opcode.CALL_INDIRECT); {
-			genCallIndirect(callFunction.label);
+			genCallIndirect(callFunction);
 		}
 
 		bindHandler(Opcode.CALL_REF); {
@@ -1344,7 +1344,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			asm.jmp_rel_far(newTrapLabel(TrapReason.NULL_DEREF));
 		}
 
-		var tailCallFunction = X86_64Label.new();
+		var tailCallFunction = masm.newLabel(-1);
 		bindHandler(Opcode.RETURN_CALL); {
 			genReadUleb32(r_tmp1);
 
@@ -1352,7 +1352,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			asm.movq_r_m(func_arg, r_tmp0.plusR(r_tmp1, offsets.REF_SIZE, offsets.Array_contents));
 
 			// return_call_indirect and return_call_ref jump here
-			asm.bind(tailCallFunction);
+			masm.bindLabel(tailCallFunction);
 			asm.movq_m_r(m_wasm_func, func_arg);
 			genInvalidateFrameAccessor();
 			// Overwrite current locals with outgoing arguments
@@ -1384,11 +1384,11 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			decrementVsp();
 			masm.emit_mov_r_m(ValueKind.REF, xenv.func_arg, vsph[0].value);
 			asm.q.cmp_r_i(func_arg, 0);
-			asm.jc_rel_near(X86_64Conds.NZ, tailCallFunction);
+			asm.jc_rel_near(X86_64Conds.NZ, tailCallFunction.label);
 			asm.jmp_rel_far(newTrapLabel(TrapReason.NULL_DEREF));
 		}
 	}
-	def genCallIndirect(callFunction: X86_64Label) {
+	def genCallIndirect(callFunction: MasmLabel) {
 		var trap_func_invalid = newTrapLabel(TrapReason.FUNC_INVALID);
 		var trap_func_sig_mismatch = newTrapLabel(TrapReason.FUNC_SIG_MISMATCH);
 		var check_sig_mismatch = X86_64Label.new();
@@ -1420,7 +1420,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		// Check table.ids[func_index] == sig_id
 		asm.movq_r_m(tmp, table.plus(offsets.Table_ids));
 		asm.d.cmp_r_m(sig_id, tmp.plusR(func_index, offsets.INT_SIZE, offsets.Array_contents));
-		asm.jc_rel_near(C.Z, callFunction);  // passed; jump to calling sequence
+		asm.jc_rel_near(C.Z, X86_64MasmLabel.!(callFunction).label);  // passed; jump to calling sequence
 
 		// Signature check failed. Mismatch or invalid function?
 		asm.bind(check_sig_mismatch);
@@ -1434,7 +1434,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		restoreCurPcFromFrame();
 		restoreCallerIVars();
 		asm.q.cmp_r_i(r_func_arg, 0);
-		asm.jc_rel_near(C.NZ, callFunction); // func != null => signature OK
+		asm.jc_rel_near(C.NZ, X86_64MasmLabel.!(callFunction).label); // func != null => signature OK
 		asm.jmp_rel_far(trap_func_sig_mismatch);
 	}
 	def genCopyStackValsToVfp(cnt: X86_64Gpr, i: X86_64Gpr) {
