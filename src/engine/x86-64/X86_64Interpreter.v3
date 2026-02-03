@@ -1191,7 +1191,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			saveCallerIVars();
 			callRuntime(refRuntimeCall(X86_64RT.runtime_THROW), [r_tmp1, r_instance, r_tmp0], true);
 			// should not return
-			asm.invalid();
+			masm.emit_intentional_crash();
 		}
 		bindHandler(Opcode.THROW_REF); {
 			computeCurIpForTrap(-1);
@@ -1202,7 +1202,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			saveCallerIVars();
 			callRuntime(refRuntimeCall(X86_64RT.runtime_THROW_REF), [r_tmp1, r_tmp0], true);
 			// should not return
-			asm.invalid();
+			masm.emit_intentional_crash();
 		}
 		if (!FeatureDisable.legacyExceptions) {
 			bindHandler(Opcode.DELEGATE);
@@ -4174,7 +4174,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		// Generate the code for the CRASH opcode.
 //TODO		bindHandler(Opcode.CRASH_EXEC);
 //TODO		bindHandler(Opcode.CRASH_COMPILER);
-		asm.invalid();
+		masm.emit_intentional_crash();
 		endHandler();
 	}
 	def newTrapLabel(reason: TrapReason) -> MasmLabel {
