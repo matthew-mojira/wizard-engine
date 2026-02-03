@@ -310,19 +310,19 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 
 	def ip_ptr		= r_ip.plus(0);
 
-	def m_wasm_func 	= R.RSP.plus(X86_64InterpreterFrame.wasm_func.offset);
-	def m_mem0_base 	= R.RSP.plus(X86_64InterpreterFrame.mem0_base.offset);
-	def m_vfp 		= R.RSP.plus(X86_64InterpreterFrame.vfp.offset);
-	def m_vsp 		= R.RSP.plus(X86_64InterpreterFrame.vsp.offset);
-	def m_sidetable 	= R.RSP.plus(X86_64InterpreterFrame.sidetable.offset);
-	def m_stp 		= R.RSP.plus(X86_64InterpreterFrame.stp.offset);
-	def m_code 		= R.RSP.plus(X86_64InterpreterFrame.code.offset);
-	def m_ip 		= R.RSP.plus(X86_64InterpreterFrame.ip.offset);
-	def m_eip 		= R.RSP.plus(X86_64InterpreterFrame.eip.offset);
-	def m_func_decl 	= R.RSP.plus(X86_64InterpreterFrame.func_decl.offset);
-	def m_instance 		= R.RSP.plus(X86_64InterpreterFrame.instance.offset);
-	def m_curpc 		= R.RSP.plus(X86_64InterpreterFrame.curpc.offset);
-	def m_accessor 		= R.RSP.plus(X86_64InterpreterFrame.accessor.offset);
+	def m_wasm_func 	= xenv.sp.plus(X86_64InterpreterFrame.wasm_func.offset);
+	def m_mem0_base 	= xenv.sp.plus(X86_64InterpreterFrame.mem0_base.offset);
+	def m_vfp 		= xenv.sp.plus(X86_64InterpreterFrame.vfp.offset);
+	def m_vsp 		= xenv.sp.plus(X86_64InterpreterFrame.vsp.offset);
+	def m_sidetable 	= xenv.sp.plus(X86_64InterpreterFrame.sidetable.offset);
+	def m_stp 		= xenv.sp.plus(X86_64InterpreterFrame.stp.offset);
+	def m_code 		= xenv.sp.plus(X86_64InterpreterFrame.code.offset);
+	def m_ip 		= xenv.sp.plus(X86_64InterpreterFrame.ip.offset);
+	def m_eip 		= xenv.sp.plus(X86_64InterpreterFrame.eip.offset);
+	def m_func_decl 	= xenv.sp.plus(X86_64InterpreterFrame.func_decl.offset);
+	def m_instance 		= xenv.sp.plus(X86_64InterpreterFrame.instance.offset);
+	def m_curpc 		= xenv.sp.plus(X86_64InterpreterFrame.curpc.offset);
+	def m_accessor 		= xenv.sp.plus(X86_64InterpreterFrame.accessor.offset);
 
 	def k_frame_size	= X86_64InterpreterFrame.size;
 
@@ -543,11 +543,11 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			asm.q.sub_r_i(r_sp, k_frame_size);
 
 			// Spill VSP (value stack pointer)
-			asm.movq_m_r(m_vsp, r_v3_vsp);
+			masm.emit_mov_m_r(ValueKind.I64, m_vsp, Target.V3_PARAM_GPRS[2] /*r_v3_vsp*/);
 			// load dispatch table into register
 			if (!FeatureDisable.globalProbes) masm.emit_load_dispatch_table_reg(xenv.dispatch);
 			// move WasmFunction into tmp
-			asm.movq_r_r(tmp, r_v3_wasm_func);
+			masm.emit_mov_r_r(ValueKind.I64, xenv.scratch/*tmp*/, Target.V3_PARAM_GPRS[1]/*r_v3_wasm_func*/);
 			restoreReg(r_vsp);
 			masm.emit_br(shared_entry);
 		}
@@ -560,7 +560,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			asm.q.sub_r_i(r_sp, k_frame_size);
 
 			// Spill VSP (value stack pointer)
-			asm.movq_m_r(m_vsp, r_vsp);
+			masm.emit_mov_m_r(ValueKind.I64, m_vsp, xenv.vsp);
 			// load dispatch table into register
 			if (!FeatureDisable.globalProbes) masm.emit_load_dispatch_table_reg(xenv.dispatch);
 			// move WasmFunction into tmp
@@ -595,7 +595,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		masm.bindLabel(shared_entry);
 		genInvalidateFrameAccessor();
 		// Load wf.instance, wf.decl and spill
-		asm.movq_m_r(m_wasm_func, tmp);
+		masm.emit_mov_m_r(ValueKind.I64, m_wasm_func, xenv.scratch);
 		asm.movq_r_m(r_instance, tmp.plus(offsets.WasmFunction_instance));
 		saveIVar(r_instance);
 		asm.movq_r_m(r_func_decl, tmp.plus(offsets.WasmFunction_decl));
@@ -613,7 +613,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		masm.bindLabel(tailCallReentryLabel);
 		// Load &func.cur_bytecode[0] into IP
 		asm.movq_r_m(tmp, r_func_decl.plus(offsets.FuncDecl_cur_bytecode));
-		asm.movq_m_r(m_code, tmp); // save CODE
+		masm.emit_mov_m_r(ValueKind.I64, m_code, xenv.scratch); // save CODE
 		asm.lea(r_ip, tmp.plus(offsets.Array_contents));
 		saveIVar(r_ip);
 		// Load IP + code.length into EIP
@@ -622,7 +622,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		saveIVar(r_eip);
 		// Load &func.sidetable[0] into STP
 		asm.movq_r_m(r_stp, r_func_decl.plus(offsets.FuncDecl_sidetable));
-		asm.movq_m_r(m_sidetable, r_stp); // save SIDETABLE
+		masm.emit_mov_m_r(ValueKind.I64, m_sidetable, xenv.stp); // save SIDETABLE
 		asm.q.add_r_i(r_stp, offsets.Array_contents);
 		saveIVar(r_stp);
 
@@ -721,7 +721,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 				computePcFromCurIp();
 				if (!FeatureDisable.stacktraces) asm.movq_r_i(r_curpc, 0);
 				saveCallerIVars();
-				asm.movq_r_m(r_tmp0, m_wasm_func); // XXX: compute func and pc directly in the right regs
+				masm.emit_mov_r_m(ValueKind.I64, xenv.tmp0, m_wasm_func); // XXX: compute func and pc directly in the right regs
 				masm.emit_get_curstack(xenv.tmp1);
 				callRuntime(refRuntimeCall(X86_64RT.runtime_PROBE_instr), [r_tmp1, r_tmp0, r_curpc], true);
 				// fall through
@@ -1225,7 +1225,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		computePc(-1);
 		masm.emit_get_curstack(xenv.tmp3);
 		saveCallerIVars();
-		asm.movq_r_m(r_tmp1, m_wasm_func);
+		masm.emit_mov_r_m(ValueKind.I64, xenv.tmp1, m_wasm_func);
 		callRuntime(refRuntimeCall(X86_64RT.runtime_TIERUP), [r_tmp3, r_tmp1, r_curpc, r_tmp4], true); // XXX: register movement
 		restoreCallerIVars();
 		masm.emit_br(done);
@@ -1353,7 +1353,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 
 			// return_call_indirect and return_call_ref jump here
 			masm.bindLabel(tailCallFunction);
-			asm.movq_m_r(m_wasm_func, func_arg);
+			masm.emit_mov_m_r(ValueKind.I64, m_wasm_func, xenv.func_arg);
 			genInvalidateFrameAccessor();
 			// Overwrite current locals with outgoing arguments
 			var cnt = r_tmp0;
@@ -2314,7 +2314,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			restoreCallerIVars();
 			var cond = if(t.0, C.Z, C.NZ); // TODO: br_on_cast/fail only differ on condition
 			asm.jc_rel_far(cond, controlSkipSidetableAndDispatchLabel); // XXX: relies on no changes to flags
-			asm.movq_r_m(r_tmp1, m_code);
+			masm.emit_mov_r_m(ValueKind.I64, xenv.tmp1, m_code);
 			// TODO: we recompute the start of the current instruction from the curpc and the code object,
 			//       because the sidetable entry's delta_ip is encoded relative to 1 + curpc
 			asm.lea(r_ip, X86_64Addr.new(r_tmp1, r_curpc, 1, 1 + offsets.Array_contents));
@@ -2609,13 +2609,13 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			computePcFromCurIp();
 			masm.emit_get_curstack(xenv.tmp1);
 			saveCallerIVars();
-			asm.movq_r_m(r_tmp0, m_wasm_func); // XXX: compute func and pc directly in the right regs
+			masm.emit_mov_r_m(ValueKind.I64, xenv.tmp0, m_wasm_func); // XXX: compute func and pc directly in the right regs
 			callRuntime(refRuntimeCall(X86_64RT.runtime_PROBE_instr), [r_tmp1, r_tmp0, r_curpc], true);
 			restoreCallerIVars();
 			// Compute a pointer to the original code at this pc offset
 			var pc = r_tmp1; // = IP - CODE
 			asm.movq_r_r(pc, r_ip);
-			asm.sub_r_m(pc, m_code);
+			masm.emit_binop_r_m(Opcode.I64_SUB, xenv.tmp1, m_code);
 			var origIp = r_tmp0; // FUNC_DECL.orig_bytecode + pc - 1
 			asm.movq_r_m(origIp, r_func_decl.plus(offsets.FuncDecl_orig_bytecode));
 			asm.add_r_r(origIp, pc);
@@ -2635,11 +2635,11 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			computeCurIpFromIp(-1);
 			computePcFromCurIp();
 			saveCallerIVars();
-			asm.movq_r_m(r_tmp0, m_wasm_func);
+			masm.emit_mov_r_m(ValueKind.I64, xenv.tmp0, m_wasm_func);
 			callRuntime(refRuntimeCall(X86_64RT.runtime_GET_LOCAL_PROBE), [r_tmp0, r_curpc], false); // XXX: do inline
 
 			// Jump to the probe's signature-specific trampoline, which pushes WhammArgs and jumps back.
-			asm.movq_r_m(r_vsp, m_vsp);
+			masm.emit_mov_r_m(ValueKind.I64, xenv.vsp, m_vsp);
 			masm.emit_mov_r_m(ValueKind.REF, xenv.func_arg, MasmAddr(xenv.runtime_ret0, masm.offsets.WhammProbe_func));
 			masm.emit_mov_r_m(ValueKind.REF, xenv.runtime_ret0, MasmAddr(xenv.runtime_ret0, masm.offsets.WhammProbe_trampoline));
 			masm.emit_jump_r(xenv.runtime_ret0);
@@ -2661,7 +2661,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			// Compute a pointer to the original code at this pc offset.
 			var pc = r_tmp1; // = IP - CODE
 			asm.movq_r_r(pc, r_ip);
-			asm.sub_r_m(pc, m_code);
+			masm.emit_binop_r_m(Opcode.I64_SUB, xenv.tmp1, m_code);
 			var origIp = r_tmp0; // FUNC_DECL.orig_bytecode + pc - 1
 			masm.emit_v3_FuncDecl_orig_bytecode_r_r(xenv.tmp0, xenv.func_decl);
 
@@ -2678,7 +2678,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			// Compute a pointer to the original code at this pc offset
 			var pc = r_tmp1; // = IP - CODE
 			asm.movq_r_r(pc, r_ip);
-			asm.sub_r_m(pc, m_code);
+			masm.emit_binop_r_m(Opcode.I64_SUB, xenv.tmp1, m_code);
 			var origIp = r_tmp0; // FUNC_DECL.orig_bytecode + pc - 1
 			masm.emit_v3_FuncDecl_orig_bytecode_r_r(xenv.tmp0, xenv.func_decl);
 			asm.add_r_r(origIp, pc);
@@ -2710,7 +2710,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		computePcFromCurIp();
 		masm.emit_get_curstack(xenv.tmp1);
 		saveCallerIVars();
-		asm.movq_r_m(r_tmp0, m_wasm_func); // XXX: compute func and pc directly in the right regs
+		masm.emit_mov_r_m(ValueKind.I64, xenv.tmp0, m_wasm_func); // XXX: compute func and pc directly in the right regs
 		callRuntime(refRuntimeCall(X86_64RT.runtime_PROBE_loop), [r_tmp1, r_tmp0, r_curpc], true);
 		restoreCallerIVars();
 	}
@@ -3705,17 +3705,17 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 	}
 	def saveIVar(r: X86_64Gpr) {
 		for (t in all_ivars) {
-			if (t.0 == r) asm.movq_m_r(t.1, r);
+			if (t.0 == r) asm.movq_m_r(A(t.1), r);
 		}
 	}
 	def spillReg(r: X86_64Gpr) {
 		for (t in mutable_ivars) {
-			if (t.0 == r) asm.movq_m_r(t.1, r);
+			if (t.0 == r) asm.movq_m_r(A(t.1), r);
 		}
 	}
 	def restoreReg(r: X86_64Gpr) {
 		for (t in all_ivars) {
-			if (t.0 == r) asm.movq_r_m(r, t.1);
+			if (t.0 == r) asm.movq_r_m(r, A(t.1));
 		}
 	}
 	def genLoad<T>(opcode: Opcode, tag: byte, gen: (X86_64Gpr, X86_64Addr) -> T) {
@@ -3830,7 +3830,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		asm.ret();
 	}
 	def genInvalidateFrameAccessor() {
-		if (!FeatureDisable.frameAccess) asm.movq_m_i(m_accessor, 0);
+		if (!FeatureDisable.frameAccess) masm.emit_mov_m_l(m_accessor, 0);
 	}
 
 	// Generate a read of a 32-bit unsigned LEB.
@@ -4120,11 +4120,11 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		asm.q.lea(r_curpc, X86_64Addr.new(r_ip, null, 1, delta - offsets.Array_contents));
 	}
 	def computePcFromCurIp() {
-		if (!FeatureDisable.stacktraces) asm.q.sub_r_m(r_curpc, m_code);
+		if (!FeatureDisable.stacktraces) masm.emit_binop_r_m(Opcode.I64_SUB, xenv.curpc, m_code);
 	}
 	def computePc(delta: int) {
 		asm.q.lea(r_curpc, X86_64Addr.new(r_ip, null, 1, delta - offsets.Array_contents));
-		asm.q.sub_r_m(r_curpc, m_code);
+		masm.emit_binop_r_m(Opcode.I64_SUB, xenv.curpc, m_code);
 	}
 	// All traps are generated out-of-line and call into the runtime.
 	def genTraps() {
@@ -4135,7 +4135,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		computePcFromCurIp();
 		masm.emit_get_curstack(xenv.tmp0);
 		saveCallerIVars();
-		asm.movq_r_m(r_tmp1, m_wasm_func);
+		masm.emit_mov_r_m(ValueKind.I64, xenv.tmp1, m_wasm_func);
 		// XXX: load runtime arg registers directly
 		callRuntime(refRuntimeCall(X86_64RT.runtime_TRAP), [r_tmp0, r_tmp1, r_curpc, r_tmp4], true);
 
@@ -4156,7 +4156,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		if (!FeatureDisable.stacktraces) saveIVar(r_curpc);
 		// XXX: load runtime arg registers directly
 		masm.emit_get_curstack(xenv.tmp0);
-		asm.movq_r_m(r_tmp1, m_wasm_func);
+		masm.emit_mov_r_m(ValueKind.I64, xenv.tmp1, m_wasm_func);
 		asm.movd_r_i(r_tmp4, TrapReason.DIV_BY_ZERO.tag);
 		callRuntime(refRuntimeCall(X86_64RT.runtime_TRAP), [r_tmp0, r_tmp1, r_curpc, r_tmp4], true);
 		// does not return
