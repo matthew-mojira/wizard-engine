@@ -540,7 +540,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			ic.header.intV3EntryOffset = w.pos;
 
 			// Allocate and initialize interpreter stack frame from incoming V3 args.
-			asm.q.sub_r_i(r_sp, k_frame_size);
+			masm.emit_binop_r_i(Opcode.I64_SUB, xenv.sp, k_frame_size);
 
 			// Spill VSP (value stack pointer)
 			masm.emit_mov_m_r(ValueKind.I64, m_vsp, Target.V3_PARAM_GPRS[2] /*r_v3_vsp*/);
@@ -557,14 +557,14 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			masm.bindLabel(spcEntryLabel);
 
 			// Allocate and initialize interpreter stack frame from incoming SPC args.
-			asm.q.sub_r_i(r_sp, k_frame_size);
+			masm.emit_binop_r_i(Opcode.I64_SUB, xenv.sp, k_frame_size);
 
 			// Spill VSP (value stack pointer)
 			masm.emit_mov_m_r(ValueKind.I64, m_vsp, xenv.vsp);
 			// load dispatch table into register
 			if (!FeatureDisable.globalProbes) masm.emit_load_dispatch_table_reg(xenv.dispatch);
 			// move WasmFunction into tmp
-			asm.movq_r_r(tmp, r_func_arg);
+			masm.emit_mov_r_r(ValueKind.I64, xenv.scratch, xenv.func_arg);
 			masm.emit_br(shared_entry);
 		}
 
@@ -585,55 +585,55 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			masm.bindLabel(callReentryLabel);
 			ic.header.intIntEntryOffset = w.pos;
 			// Allocate actual stack frame
-			asm.q.sub_r_i(r_sp, k_frame_size);
+			masm.emit_binop_r_i(Opcode.I64_SUB, xenv.sp, k_frame_size);
 			// Spill the (valid) stack pointer
 			saveIVar(r_vsp);
 			// WasmFunction is in r1 for interpreter reentry
-			asm.movq_r_r(tmp, r_func_arg);
+			masm.emit_mov_r_r(ValueKind.I64, xenv.scratch, xenv.func_arg);
 		}
 
 		masm.bindLabel(shared_entry);
 		genInvalidateFrameAccessor();
 		// Load wf.instance, wf.decl and spill
 		masm.emit_mov_m_r(ValueKind.I64, m_wasm_func, xenv.scratch);
-		asm.movq_r_m(r_instance, tmp.plus(offsets.WasmFunction_instance));
+		masm.emit_mov_r_m(ValueKind.I64, xenv.instance, xenv.scratch.plus(offsets.WasmFunction_instance));
 		saveIVar(r_instance);
-		asm.movq_r_m(r_func_decl, tmp.plus(offsets.WasmFunction_decl));
+		masm.emit_mov_r_m(ValueKind.I64, xenv.func_decl, xenv.scratch.plus(offsets.WasmFunction_decl));
 		saveIVar(r_func_decl);
 
 		// Compute VFP = VSP - func.sig.params.length * SLOT_SIZE
-		asm.movq_r_m(tmp, r_func_decl.plus(offsets.FuncDecl_sig));
-		asm.movq_r_m(tmp, tmp.plus(offsets.SigDecl_params));
-		asm.movd_r_m(tmp, tmp.plus(offsets.Array_length));
+		masm.emit_mov_r_m(ValueKind.I64, xenv.scratch, xenv.func_decl.plus(offsets.FuncDecl_sig));
+		masm.emit_mov_r_m(ValueKind.I64, xenv.scratch, xenv.scratch.plus(offsets.SigDecl_params));
+		masm.emit_mov_r_m(ValueKind.I32, xenv.scratch, xenv.scratch.plus(offsets.Array_length));
 		asm.q.shl_r_i(tmp, valuerep.slot_size_log);
-		asm.movq_r_r(r_vfp, r_vsp);
+		masm.emit_mov_r_r(ValueKind.I64, xenv.vfp, xenv.vsp);
 		asm.q.sub_r_r(r_vfp, tmp);
 		saveIVar(r_vfp);
 
 		masm.bindLabel(tailCallReentryLabel);
 		// Load &func.cur_bytecode[0] into IP
-		asm.movq_r_m(tmp, r_func_decl.plus(offsets.FuncDecl_cur_bytecode));
+		masm.emit_mov_r_m(ValueKind.I64, xenv.scratch, xenv.func_decl.plus(offsets.FuncDecl_cur_bytecode));
 		masm.emit_mov_m_r(ValueKind.I64, m_code, xenv.scratch); // save CODE
 		asm.lea(r_ip, tmp.plus(offsets.Array_contents));
 		saveIVar(r_ip);
 		// Load IP + code.length into EIP
-		asm.movd_r_m(r_eip, tmp.plus(offsets.Array_length));
-		asm.q.add_r_r(r_eip, r_ip);
+		masm.emit_mov_r_m(ValueKind.I32, xenv.eip, xenv.scratch.plus(offsets.Array_length));
+		masm.emit_binop_r_r(Opcode.I64_ADD, xenv.eip, xenv.ip);
 		saveIVar(r_eip);
 		// Load &func.sidetable[0] into STP
-		asm.movq_r_m(r_stp, r_func_decl.plus(offsets.FuncDecl_sidetable));
+		masm.emit_mov_r_m(ValueKind.I64, xenv.stp, xenv.func_decl.plus(offsets.FuncDecl_sidetable));
 		masm.emit_mov_m_r(ValueKind.I64, m_sidetable, xenv.stp); // save SIDETABLE
-		asm.q.add_r_i(r_stp, offsets.Array_contents);
+		masm.emit_binop_r_i(Opcode.I64_ADD, xenv.stp, offsets.Array_contents);
 		saveIVar(r_stp);
 
 		// Load instance.memories[0].start into MEM0_BASE
-		var mem0 = r_mem0_base;
-		asm.movq_r_m(mem0, r_instance.plus(offsets.Instance_memories));
+		var mem0 = xenv.mem0_base;
+		masm.emit_mov_r_m(ValueKind.I64, mem0, xenv.instance.plus(offsets.Instance_memories));
 		var no_mem = masm.newLabel(-1);
-		asm.movd_r_m(r_tmp0, mem0.plus(offsets.Array_length)); // XXX: always have a memories[0].start to avoid a branch?
+		masm.emit_mov_r_m(ValueKind.I32, xenv.tmp0, mem0.plus(offsets.Array_length)); // XXX: always have a memories[0].start to avoid a branch?
 		masm.emit_br_r(xenv.tmp0, MasmBrCond.I32_ZERO, no_mem);
-		asm.movq_r_m(mem0, mem0.plus(offsets.Array_contents));
-		asm.movq_r_m(mem0, mem0.plus(offsets.NativeWasmMemory_start));
+		masm.emit_mov_r_m(ValueKind.I64, mem0, mem0.plus(offsets.Array_contents));
+		masm.emit_mov_r_m(ValueKind.I64, mem0, mem0.plus(offsets.NativeWasmMemory_start));
 		masm.bindLabel(no_mem);
 		saveIVar(r_mem0_base);
 
