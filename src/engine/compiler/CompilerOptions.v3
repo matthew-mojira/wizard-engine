@@ -29,6 +29,8 @@ component CompilerOptions {
 			.onSet(fun v => void(SpcTuning.compileWhammModules = v));
 		group.newBoolOption("inline-whamm-probes", true, "Inline small whamm probes.")
 			.onSet(fun v => void(SpcTuning.inlineSmallFunc = v));
+		group.newBoolOption("inline-regular-funcs", true, "Inline small regular function calls.")
+			.onSet(fun v => void(SpcTuning.inlineRegularFuncs = v));
 	}
 
 	def printHelp(out: TraceBuilder) {

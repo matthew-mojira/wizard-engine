@@ -114,6 +114,7 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 	// in the current context.
 	var local_base_sp: u31 = 0;
 	var is_inlined = false;
+	var inline_depth: u31 = 0;  // tracks current inlining depth for regular function calls
 	// tracks the last masm writer offset to generate instruction trace for each bytecode.
 	var codegen_offset: u64 = 0;
 
@@ -135,41 +136,47 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 		var ok = Metrics.spc_time_us.run(gen0, (module, func));
 		return if(ok, osr_entry_label);
 	}
+	// What has to change when this is being inlined
 	private def gen0(module: Module, func: FuncDecl) -> bool {
 		if (Trace.compiler) OUT.put1("==== begin compile: %q ========================", func.render(module.names, _)).ln();
 		var before_code_bytes = masm.curCodeBytes();
 		var before_data_bytes = masm.curDataBytes();
 
 		// Reset internal state.
-		this.module = module;
-		this.func = func;
-		it.reset(func);
-		sig = func.sig;
-		regAlloc.clear();
-		trap_labels.resize(0);
-		success = true;
-		osr_offset = -1;
-		osr_state = null;
-		handler_dest_info.clear();
-		handler_dest_info.resize(func.handlers.handler_dests.length);
+		this.module = module;   // should we allow inter-module inlined calls? I want to say no
+		this.func = func;       // must save this
+		it.reset(func);		// must save current position before reset, as there is an "inlining context" at play
+		sig = func.sig;         // must save this
+		regAlloc.clear();       // do NOT clear regalloc state, as we'll need it
+		trap_labels.resize(0);  // can do this
+		// When generating trap labels, we need to include inlined calls as part of the frame
+		// so the implementation of the trap handler will require this frame reconstruction
+		success = true; // XXX I don't know what this is
+		osr_offset = -1; // XXX I don't know what this is
+		osr_state = null; // XXX I don't know what this is
+		handler_dest_info.clear(); // XXX I don't know what this is
+		handler_dest_info.resize(func.handlers.handler_dests.length); // XXX I don't know what this is
 
 		// Initialize parameters, locals, and first control stack entry.
-		var end_label = masm.newLabel(func.cur_bytecode.length);
-		state.reset(sig, end_label);
-		state.num_locals = func.num_slots();
+		var end_label = masm.newLabel(func.cur_bytecode.length); // XXX what does this mean if we don't reset state?
+		state.reset(sig, end_label); // XXX what does this mean if we don't reset state?
+		state.num_locals = func.num_slots(); // XXX what does this mean if we don't reset state?
 
 		// Emit prologue, which allocates the frame and initializes various registers.
-		emitPrologue();
+		emitPrologue(); // Do not emit this
 
 		// Visit all local declarations.
-		it.dispatchLocalDecls(this);
+		it.dispatchLocalDecls(this); // XXX What exactly does this do?
 
+		// XXX I don't knwow what this is
 		if (!FeatureDisable.frameVariables && func.frame_var_tags != null) {
 			for (t in func.frame_var_tags) state.push(tagToKindFlags(t) | IS_CONST, NO_REG, 0);
 		}
 
 		// Emit function entry probe, if any.
 		if (!FeatureDisable.entryProbes && func.entry_probed) {
+			// Probe code needs to be careful here about the current state
+			// If it probes, we probably have to save/update state eagerly
 			var probe = Instrumentation.getLocalProbe(module, func.func_index, 0);
 			emitProbe0(0, probe);
 		}
@@ -180,11 +187,11 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 			last_probe = 0;
 			masm.source_loc = it.pc;
 			it.dispatch(this);
-			unrefRegs();
+			unrefRegs(); // XXX I don't know what this does
 			if (Trace.compiler && Trace.asm) {
 				OUT.puts("JIT code: ");
 				masm.printCodeBytes(OUT, before_code_bytes, masm.curCodeBytes());
-				before_code_bytes = masm.curCodeBytes();
+				before_code_bytes = masm.curCodeBytes(); // XXX I don't know what this does
 				OUT.ln();
 			}
 			if (Debug.compiler) checkRegAlloc();
@@ -835,8 +842,115 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 		masm.emit_br(ret_label);
 		setUnreachable();
 	}
+	def shouldInlineRegular(decl: FuncDecl) -> bool {
+		// Check if regular function inlining is enabled.
+		if (!SpcTuning.inlineRegularFuncs) return false;
+		// Don't inline if we're already inlining (prevents recursion).
+		if (is_inlined) return false;
+		// Don't inline imports (they don't have bytecode).
+		if (decl.imp != null) return false;
+		// Check depth limit.
+		if (inline_depth >= u31.view(SpcTuning.maxInlineDepth)) return false;
+		// Check the bytecode heuristics.
+		if (decl.orig_bytecode.length > 50 || decl.sig.params.length > 10) return false;
+		if (decl.sig.params.length > 0 || decl.sig.results.length > 0) return false;
+		var bi = BytecodeIterator.new().reset(decl);
+		while (bi.more()) {
+			var op = bi.current();
+			match (op) {
+				// Cannot handle control flow - reject these functions.
+				IF, BR, BR_IF, BR_TABLE, BR_ON_NULL, BR_ON_NON_NULL, BR_ON_CAST, BR_ON_CAST_FAIL, RETURN
+					=> return false;
+				CALL, CALL_INDIRECT  => return false;
+				_ => ;
+			}
+			bi.next();
+		}
+		return true;
+	}
+	def emitInlinedCall(callee_decl: FuncDecl) {
+		var callee_sig = callee_decl.sig;
+		def new_local_base_sp = int.view(state.sp);
+		var orig_sp = state.sp;
+		var params_count = u32.!(callee_sig.params.length);
+
+		// Note: Since we only inline same-module calls, we don't need to swap
+		// instance or memory base. The current module context is already correct.
+
+		// Save context.
+		var prev_it = it;
+		var orig_func = this.func;
+		var orig_sig = this.sig;
+
+		// Set up for inlining.
+		it = BytecodeIterator.new().reset(callee_decl);
+		this.local_base_sp = u31.view(state.sp);
+		this.func = callee_decl;
+		this.sig = callee_sig;
+
+		// Inline the function body.
+		it.dispatchLocalDecls(this);
+		this.is_inlined = true;
+		inline_depth++;
+		if (Trace.compiler) Trace.OUT.puts("Start compiling inlined regular call").ln();
+		while (it.more() && success) {
+			if (Trace.compiler) traceOpcodeAndStack(false);
+			last_probe = 0;
+			masm.source_loc = it.pc;
+			it.dispatch(this);
+			if (Trace.compiler && Trace.asm) {
+				OUT.puts("JIT code: ");
+				masm.printCodeBytes(OUT, codegen_offset, masm.curCodeBytes());
+				codegen_offset = masm.curCodeBytes();
+				OUT.ln();
+			}
+			unrefRegs();
+			if (Debug.compiler) checkRegAlloc();
+			it.next();
+		}
+		if (Trace.compiler) Trace.OUT.puts("Finished compiling inlined regular call").ln();
+
+		// Restore context.
+		inline_depth--;
+		it = prev_it;
+		this.local_base_sp = 0;
+		this.is_inlined = false;
+		this.func = orig_func;
+		this.sig = orig_sig;
+
+		// Handle stack cleanup similar to a regular call.
+		// The inlined function's results are at the top of the stack.
+		// We need to adjust the abstract state to reflect: pop args, push results.
+		var results_count = u32.!(callee_sig.results.length);
+
+		dropN(state.sp - orig_sp);
+
+// 		// Calculate how many slots to drop: everything except the results
+// 		var slots_to_drop = state.sp - orig_sp - results_count;
+// 		if (slots_to_drop > 0) {
+// 			// Move results down to where parameters started, then drop params/locals
+// 			// For now, just use dropN to clean up extra slots
+// 			// The results are at the top, so we need to preserve them
+// 			for (i < results_count) {
+// 				var result_slot = state.sp - results_count + u32.view(i);
+// 				var target_slot = orig_sp - params_count + u32.view(i);
+// 				if (result_slot != target_slot) {
+// 					state.state[target_slot] = state.state[result_slot];
+// 				}
+// 			}
+// 			// Drop everything from orig_sp onwards
+// 			state.sp = orig_sp - params_count + results_count;
+// 		}
+	}
 	def visitCallDirect(op: Opcode, index: u31, tailCall: bool) {
 		var func = module.functions[index];
+
+		// Check if we should inline this call.
+		if (!tailCall && shouldInlineRegular(func)) {
+			emitInlinedCall(func);
+			return;
+		}
+
 		var retpt = masm.newLabel(it.pc), wasmcall_label = masm.newLabel(it.pc);
 		// Load the instance (which must happen before frame is unwound).
 		var vsp_reg = allocTmpFixed(ValueKind.REF, regs.vsp);

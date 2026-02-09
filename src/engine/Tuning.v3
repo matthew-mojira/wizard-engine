@@ -60,6 +60,8 @@ component SpcTuning {
 	var compileWhammModules = true;		// compile whamm module, if possible
 	var intrinsifyWhammProbe = true;	// recognize and optimize WhammProbes
 	var inlineSmallFunc = true;		// inline small functions, currently only applicable for whamm probes
+	var inlineRegularFuncs = true;		// inline small regular function calls
+	def maxInlineDepth = 2;			// maximum depth of nested inlining
 	def probeCallFreesRegs = true;		// probe calls frees registers in abstract state
 	def runtimeCallFreesRegs = true;	// runtime calls frees registers in abstract state
 	var intrinsifyMemoryProbes = true;
