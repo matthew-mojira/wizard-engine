@@ -64,7 +64,8 @@ class X86_64MacroAssembler extends MacroAssembler {
 		label.label.pos = offset;
 	}
 	def recordCurSourceLoc() {
-		recordSourceLoc(asm.pos());
+		recordSourceLoc(asm.pos()); // this is offset into asm code
+		// THIS IS THE KEY
 	}
 	def recordRetSourceLoc() {
 		// To distinguish an entry for the return address of a call from an entry for a Wasm instruction

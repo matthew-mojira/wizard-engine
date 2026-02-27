@@ -37,9 +37,6 @@ class X86_64SinglePassCompiler extends SinglePassCompiler {
 	def getTrapStubIp(reason: TrapReason) -> long {
 		return mmasm.trap_stubs.getIpForReason(reason) - Pointer.NULL;
 	}
-	def getInlinedFrameStubIp() -> long {                                                                                 
-		return INLINED_FRAME_STUB.start - Pointer.NULL;                                                      
-	}
 
 	private def visitCompareI(asm: X86_64Assembler, cond: X86_64Cond) -> bool {
 		var b = pop(), a = popReg();
@@ -1192,7 +1189,8 @@ class X86_64SpcCode extends RiUserCode {
 class X86_64SpcModuleCode extends X86_64SpcCode {
 	def mapping: Mapping;
 	var codeEnd: int;			// for dynamically adding code to the end
-	var sourcePcs: Vector<(int, int)>;
+	//var sourcePcs: Vector<(int, int)>;
+	var sourcePcs: Vector<(int, List<(int, int)>)>;
 	var embeddedRefOffsets: Vector<int>;
 
 	new(mapping) super("spc-module", mapping.range.start, mapping.range.end) {
@@ -1244,7 +1242,8 @@ class X86_64SpcModuleCode extends X86_64SpcCode {
 			// Update the current PC in the JIT frame, if it is accessible.
 			var ip = p_rip.load<Pointer>();
 			var pc = lookupPc(ip, false);
-			(p_rsp + X86_64InterpreterFrame.curpc.offset).store<int>(pc);
+			// TODO when lookupPc returns a list, iterate and push onto successive frames
+			(p_rsp + X86_64InterpreterFrame.curpc.offset).store<int>(pc.head.0/*TODO placeholder*/);
 		}
 
 		var handler_ip = TRAPS_STUB.getIpForReason(reason);
@@ -1252,19 +1251,19 @@ class X86_64SpcModuleCode extends X86_64SpcCode {
 	}
 	// Look up the source {pc} of a location {i} in this code. Returns {-1} if no exact entry is found.
 	// Return addresses are treated differently than other addresses in the code.
-	def lookupPc(ip: Pointer, isRetAddr: bool) -> int {
+	def lookupPc(ip: Pointer, isRetAddr: bool) -> List<(int, int)> {
 		if (Trace.compiler) Trace.OUT.put2("SpcCode.lookupPc(0x%x, ret=%z)", (ip - Pointer.NULL), isRetAddr).ln();
-		if (sourcePcs == null) return -1;
-		if (!mapping.range.contains(ip)) return -1;
+		if (sourcePcs == null) return null; // XXX null
+		if (!mapping.range.contains(ip)) return null; // XXX null
 		var offset = ip - mapping.range.start - if(isRetAddr, 1);
 		// XXX: use binary search for looking up source PCs in SPC code
 		if (Trace.compiler) Trace.OUT.put1(" looking for offset=%d", offset).ln();
 		for (i < sourcePcs.length) {
 			var entry = sourcePcs[i];
-			if (Trace.compiler) Trace.OUT.put2("  (offset=%d, pc=%d)", entry.0, entry.1).ln();
+			if (Trace.compiler) Trace.OUT.put2("  (offset=%d, pc=%d)", entry.0, entry.1 /* XXX wrong type? */).ln();
 			if (offset == entry.0) return entry.1;
 		}
-		return -1;
+		return null; // XXX null
 	}
 	// Appends code to the end of this module.
 	def appendCode(masm: X86_64MacroAssembler) -> Pointer {
@@ -1314,16 +1313,6 @@ class X86_64SpcTrapsStub extends X86_64SpcCode {
 	}
 }
 
-// Marker for reconstructed inlined frames in stack traces.
-// Used as the return address for frames materialized during frame reconstruction.
-class X86_64InlinedFrameStub extends X86_64SpcCode {
-       new() super("inlined-frame", Pointer.NULL, Pointer.NULL) { }
-
-       // Inherits describeFrame and nextFrame from X86_64SpcCode
-       // which correctly read wasm_func/instance from frame slots and advance by frameSize
-}
-
-
 // The lazy-compile stub needs special handling in the Virgil runtime because it has
 // a frame that stores the function being compiled.
 class X86_64SpcCompileStub extends RiUserCode {
@@ -1365,9 +1354,6 @@ def LAZY_COMPILE_STUB = X86_64PreGenStub.new("spc-lazy-compile", X86_64SpcCompil
 def TIERUP_COMPILE_STUB = X86_64PreGenStub.new("spc-tierup-compile", X86_64SpcCompileStub.new("tierup"), genTierUpCompileStub);
 def TRAPS_STUB = X86_64SpcTrapsStub.new();
 def TRAPS_PREGEN = X86_64PreGenStub.new("spc-trap", TRAPS_STUB, genTrapsStub);
-def INLINED_FRAME_STUB = X86_64InlinedFrameStub.new();
-def INLINED_FRAME_PREGEN = X86_64PreGenStub.new("spc-inlined-frame", INLINED_FRAME_STUB, genInlinedFrameStub);
-
 
 def genSpcEntryFunc(ic: X86_64InterpreterCode, w: DataWriter) {
 	if (SpcTuning.disable) return;
@@ -1460,6 +1446,7 @@ def genTrapsStub(ic: X86_64InterpreterCode, w: DataWriter) {
 			masm.emit_get_curstack(regs.runtime_arg0);	// stack
 			masm.emit_v3_set_X86_64Stack_rsp_r_r(regs.runtime_arg0, regs.sp);
 			masm.emit_push_X86_64Stack_rsp_r_r(regs.runtime_arg0);
+			// TODO what wasm_func and pc are these?
 			asm.movq_r_m(G(Target.V3_PARAM_GPRS[2]), m_wasm_func);	// wasm_func
 			asm.movq_r_i(G(Target.V3_PARAM_GPRS[3]), -1);		// pc
 			asm.movd_r_i(G(Target.V3_PARAM_GPRS[4]), reason.tag);	// reason
@@ -1471,10 +1458,6 @@ def genTrapsStub(ic: X86_64InterpreterCode, w: DataWriter) {
 		if (skip < 0) System.error("TrapsStubError", "handler size too big");
 		w.skipN(skip);
 	}
-}
-def genInlinedFrameStub(ic: X86_64InterpreterCode, w: DataWriter) {
-       var masm = X86_64MacroAssembler.new(w, X86_64MasmRegs.CONFIG);
-       masm.emit_intentional_crash(); // do not execute this
 }
 def codePointer<P, R>(f: P -> R) -> Pointer {
 	return CiRuntime.unpackClosure<X86_64Spc, P, R>(f).0;
