@@ -16,6 +16,7 @@ class CfgBuilder {
 	def build(func: FuncDecl) -> CfgBlock {
 		var start = ctl_stack.reset();
 		bi.reset(func);
+		bi.dispatchLocalDecls(ctl_stack); // advance bi.pc past locals before ctl_stack.pc is read
 		while (bi.more()) {
 			ctl_stack.pc = bi.pc;
 			bi.dispatch(ctl_stack);
@@ -51,16 +52,54 @@ class CfgBuilder {
 def verbose = false;
 var labelId = 100;
 
+class CfgEdge(pc: int, target: CfgBlock) {
+	var val: int; // weight assigned by Ball-Larus
+}
+
 class CfgBlock(decl_pos: int) {
 	def id = labelId++;
 	var bind_pos: int = -1;
-	var outgoing: List<(int, CfgBlock)>;
-	var incoming: List<(int, CfgBlock)>;
+	var outgoing: List<CfgEdge>;
+	var incoming: List<CfgEdge>;
 	var mark: int;
+	var numPaths: int; // Ball-Larus NumPaths(v): number of paths from this vertex to EXIT
 
+	// links this CfgBlock with `t`
 	def goto(pc: int, t: CfgBlock) {
 		if (verbose) Trace.OUT.put2("add id:%d -> id:%d", this.id, t.id).ln();
-		outgoing = List.new((pc, t), outgoing);
-		t.incoming = List.new((pc, this), t.incoming);
+		var e = CfgEdge.new(pc, t);
+		outgoing = List.new(e, outgoing);
+		t.incoming = List.new(e, t.incoming);
+	}
+	def hash() -> int {
+		return id;
+	}
+	def equals(that: CfgBlock) -> bool {
+		return this.id == that.id;
+	}
+
+	def dfs<R>(pre: CfgBlock -> R, onEdge: CfgEdge -> R, post: CfgBlock -> R) {
+		// XXX visited set tracks blocks only for the unmarking
+		// actually checking if the block is visited is done through `mark` field
+		def visited = Vector<CfgBlock>.new();
+
+		dfs0(pre, onEdge, post, visited);
+
+		visited.apply(CfgBlock.resetMark);
+	}
+	private def resetMark() { mark = 0; }
+	private def dfs0<R>(pre: CfgBlock -> R, onEdge: CfgEdge -> R, post: CfgBlock -> R, visited: Vector<CfgBlock>) {
+		if (mark != 0) return;
+		mark = 1;
+
+		visited.put(this);
+		if (pre != null) pre(this);
+		Lists.apply(outgoing, fun (e: CfgEdge) {
+			def child = e.target;
+
+			if (onEdge != null) onEdge(e);
+			if (child != null) child.dfs0(pre, onEdge, post, visited);
+		});
+		if (post != null) post(this);
 	}
 }
