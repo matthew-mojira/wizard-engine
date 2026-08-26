@@ -13,14 +13,14 @@ class ControlStack<B> extends BytecodeVisitor {
 	var newLabel: (ControlStack<B>) -> B = ControlStack<B>.defaultNewLabel;
 	// Creates a new empty block which is not part of the control stack.
 	var newBlock: (ControlStack<B>) -> B = ControlStack<B>.defaultNewLabel;
-	// Splits a block into two (e.g. branch).
-	var splitBlock: (ControlStack<B>, B) -> (B, B) = ControlStack<B>.defaultSplitBlock;
 	// Splits a block and merges the first into a label.
 	var splitBlockInto: (ControlStack<B>, B, B) -> (B, B) = ControlStack<B>.defaultSplitBlockInto;
 	// Merges a block into another block.
 	var mergeBlock: (ControlStack<B>, B, B) -> B = ControlStack<B>.defaultMergeBlock;
 	// Binds a label position.
 	var bindLabel: (ControlStack<B>, int, B) -> void = ControlStack<B>.defaultBindLabel;
+	// Notifies that {b} is abandoned because control cannot fall out of it.
+	var endBlock: (ControlStack<B>, B) -> void = ControlStack<B>.defaultEndBlock;
 	// current block
 	var block: B;
 
@@ -59,24 +59,39 @@ class ControlStack<B> extends BytecodeVisitor {
 		bindLabel(this, pc, ctl.label);
 		block = ctl.label = mergeBlock(this, block, ctl.label);
 	}
+	// Only the taken arm gets a block here; the false edge is deferred until the else (or the end,
+	// for a one-armed if) so that no block is created for an else clause that does not exist.
+	// {ctl.else_block} holds the block containing the `if` — the source of that deferred edge.
 	def visit_IF(btc: BlockTypeCode) {
-		var from = stack.peek();
-		var t = splitBlock(this, block);
+		var if_block = block, dead = isUnreachable();
 		var ctl = push(Opcode.IF);
-		block = t.0;
-		bindLabel(this, -1, block);
-		ctl.else_block = t.1;
+		ctl.else_block = if_block;
+		if (dead) return; // nothing to branch from; leave {block} as-is
+		var then_block = newLabel(this);
+		bindLabel(this, -1, then_block);
+		block = mergeBlock(this, if_block, then_block);
 	}
 	def visit_ELSE() {
 		var ctl = stack.peek();
 		ctl.label = mergeBlock(this, block, ctl.label);
+		var if_pc = ctl.start_pos, if_block = ctl.else_block;
 		ctl.start_pos = pc;
 		ctl.start_opcode = Opcode.ELSE;
 		ctl.reachable = true;
-		block = ctl.else_block;
-		bindLabel(this, -1, block);
+		var else_block = newLabel(this);
+		bindLabel(this, -1, else_block);
+		block = mergeAt(if_pc, if_block, else_block); // the false edge belongs to the `if`
 		var d: B;
 		ctl.else_block = d;
+	}
+	// merges {from} into {to} as if the current position were {at}, for an edge whose branch is
+	// earlier than the instruction that finally materializes it
+	private def mergeAt(at: int, from: B, to: B) -> B {
+		var saved = pc;
+		pc = at;
+		var r = mergeBlock(this, from, to);
+		pc = saved;
+		return r;
 	}
 	def visit_TRY(btc: BlockTypeCode) {
 		block = mergeBlock(this, block, newBlock(this)); // split blocks at try
@@ -124,14 +139,16 @@ class ControlStack<B> extends BytecodeVisitor {
 		}
 		setUnreachable();
 	}
+	// a return is a branch to the function's outermost label, per the Wasm spec; going through
+	// br() gives it a real edge carrying the return instruction's own pc
 	def visit_RETURN() {
-		setUnreachable();
+		br(u31.!(stack.top - 1));
 	}
 	def visit_RETURN_CALL(func_index: u31) {
-		setUnreachable();
+		br(u31.!(stack.top - 1));
 	}
 	def visit_RETURN_CALL_INDIRECT(sig_index: u31, table_index: u31) {
-		setUnreachable();
+		br(u31.!(stack.top - 1));
 	}
 	def visit_BR_ON_NULL(label: u31) {
 		brIf(label);
@@ -172,11 +189,12 @@ class ControlStack<B> extends BytecodeVisitor {
 				// loop is a fallthru, block unchanged
 			}
 			IF => {
-				// one-armed if; simulate empty else clause
+				// one-armed if; the false edge goes straight from the `if` to here, so no block is
+				// ever created for the absent else clause
 				var end = ctl.label;
 				end = mergeBlock(this, block, end); // fallthru
 				ctl.reachable = true;
-				end = mergeBlock(this, ctl.else_block, end); // else merge
+				end = mergeAt(ctl.start_pos, ctl.else_block, end); // false edge, from the `if`
 				bindLabel(this, pc, end);
 				block = end;
 			}
@@ -192,6 +210,7 @@ class ControlStack<B> extends BytecodeVisitor {
 	private def setUnreachable() {
 		var from = stack.peek();
 		from.reachable = false;
+		endBlock(this, block);
 		block = newBlock(this);
 	}
 	private def br(depth: u31) {
@@ -213,9 +232,6 @@ class ControlStack<B> extends BytecodeVisitor {
 		var d: B;
 		return d;
 	}
-	def defaultSplitBlock(b: B) -> (B, B) {
-		return (newLabel(this), newLabel(this));
-	}
 	def defaultSplitBlockInto(from: B, to: B) -> (B, B) {
 		var new_from = mergeBlock(this, from, to);
 		var rem = newLabel(this);
@@ -226,6 +242,8 @@ class ControlStack<B> extends BytecodeVisitor {
 	def defaultMergeBlock(from: B, to: B) -> B {
 		var d: B;
 		return d;
+	}
+	def defaultEndBlock(b: B) {
 	}
 	def defaultBindLabel(pc: int, b: B) {
 	}
