@@ -3,8 +3,6 @@ def monitor_ = MonitorRegistry.add(
 	"path-profile", "Profiles dynamic execution paths through functions.",
 	PathProfilingMonitor.new());
 
-def EXIT_DECL_POS = -1;
-
 class PathProfilingMonitor extends Monitor {
 	var module: Module;
 	def entries = Vector<PathProfileEntry>.new();
@@ -15,17 +13,14 @@ class PathProfilingMonitor extends Monitor {
 		for (j < m.functions.length) {
 			def func: FuncDecl = m.functions[j];
 			if (func.imp != null) continue; // skip imported functions
-			def cfg: CfgBlock = cfgBuilder.build(func);
+			def cfgExit = cfgBuilder.build(func);
+			def cfg = cfgExit.0, exit = cfgExit.1;
 
 			// (Section 3.1) CFG to DAG
 
 			// skip path numbering for CFGs with backedges (CFG => DAG)
 			// TODO implement general CFG -> DAG conversion (Section 4)
 			if (hasBackedge(cfg)) continue;
-
-			// add an explicit single EXIT node to CFG
-			def exit: CfgBlock = CfgBlock.new(EXIT_DECL_POS);
-			cfg.dfs(null, null, fun (b: CfgBlock) { if (b.outgoing == null) b.goto(-1, exit); });
 
 			// (Section 3.2) assign values to edges to make sums across all paths unique
 
@@ -39,17 +34,16 @@ class PathProfilingMonitor extends Monitor {
 			// Determine Increment(e) for each chord in the spanning tree (Ball Fig. 4)
 			st.computeIncrements(cfg);
 
-			// (Section 3.4)
-			// determine instrumentation points
-			def plan: InstrPlan = InstrPlan.new(st);
-			placeInit(cfg, st, plan);
-			placeCount(exit, st, plan);
-			placeDefault(st, plan);
+			// (Section 3.4) Figure 8. instrument the edges directly
+			placeInit(cfg, st);
+			placeCount(exit, st);
+			placeDefault(st);
 
-			// place instrumentaiton
+			// place probes, covering the edges each decision dispatches to
 			def counts: Array<int> = Array<int>.new(cfg.numPaths); // counts of every path through the function
-			placeProbes(m, func, cfg, exit, st, plan, counts);
-			entries.put(PathProfileEntry.new(func, cfg, exit, st, plan, counts));
+			placeProbes(m, func, cfg, exit, st, counts);
+
+			entries.put(PathProfileEntry.new(func, cfg, exit, st, counts));
 		}
 	}
 	def onFinish(i: Instance, r: Result) {
@@ -62,7 +56,7 @@ class PathProfilingMonitor extends Monitor {
 	}
 }
 
-private class PathProfileEntry(func: FuncDecl, cfg: CfgBlock, exit: CfgBlock, st: SpanningTree, plan: InstrPlan, counts: Array<int>) {
+private class PathProfileEntry(func: FuncDecl, cfg: CfgBlock, exit: CfgBlock, st: SpanningTree, counts: Array<int>) {
 	// TODO this counts is caller-independent, where we probably want it also indexed by caller (location)
 }
 
@@ -100,6 +94,9 @@ private class TreeEdge(source: CfgBlock, target: CfgBlock, edge: CfgEdge) {
 	// classification + position within SpanningTree.chords/tree, assigned by kruskals
 	var isChord: bool;
 	var index: int;
+	// Fig. 8's instrumentation for this edge, attached in pass order as each pass runs. Probes hold
+	// references to the edges they cover, so instrumenting here takes effect immediately.
+	def actions = Vector<Action>.new();
 }
 def hashCfgEdge(e: CfgEdge) -> int { return e.pc; }
 def equalsCfgEdge(a: CfgEdge, b: CfgEdge) -> bool { return a == b; }
@@ -255,7 +252,6 @@ def kruskals(entry: CfgBlock, exit: CfgBlock) -> SpanningTree {
 // runtime actions an edge can carry, executed against the per-activation register {r} and the
 // per-function path-count histogram {counts}
 private type Action {
-	case Nothing;
 	case RSet(value: int);       // r = value
 	case RAdd(value: int);       // r += value
 	case CountR;                 // counts[r]++
@@ -263,18 +259,20 @@ private type Action {
 	case CountRPlus(value: int); // counts[r + value]++
 }
 
-// Instrumentation placement, Ball-Larus Fig. 8. chordAction[i] holds the action assigned directly
-// at the point each pass runs ('r=Inc(e)' from pass 1, replaced by 'count[Inc(e)]++' or
-// 'count[r+Inc(e)]++' from pass 2); Action.Nothing if no pass touched that chord, which falls to
-// pass 3's 'r+=Inc(c)'. treeAction[i] is tree edge i's actions, prepended in pass order ('r=0'
-// from pass 1, 'count[r]++' from pass 2) so the list is in reverse-pass order; null if neither ran.
-private class InstrPlan(st: SpanningTree) {
-	def chordAction = Array<Action>.new(st.chords.length);
-	def treeAction = Array<List<Action>>.new(st.tree.length);
+// Fig. 8's instrument(e, code): attaches {a} to edge {e}. Probes already reference the edges they
+// cover, so this takes effect immediately — nothing reconstructs it afterwards.
+def instrument(te: TreeEdge, a: Action) {
+	te.actions.put(a);
+}
+// replaces {e}'s instrumentation, for the Section 3.4 optimization where a chord that both
+// initializes and counts "simply becomes count[Inc(c)]++"
+def reinstrument(te: TreeEdge, a: Action) {
+	te.actions.resize(0);
+	te.actions.put(a);
 }
 
 // Pass 1, Fig. 8: register initialization code
-def placeInit(entry: CfgBlock, st: SpanningTree, plan: InstrPlan) {
+def placeInit(entry: CfgBlock, st: SpanningTree) {
 	def ws = Vector<CfgBlock>.new();
 	ws.put(entry);
 	Vectors.drain(ws, 0, fun (v: CfgBlock) {
@@ -284,20 +282,20 @@ def placeInit(entry: CfgBlock, st: SpanningTree, plan: InstrPlan) {
 			// if e is a chord edge
 			if (te.isChord) {
 				// instrument(e, 'r=Inc(e)')
-				plan.chordAction[te.index] = Action.RSet(st.chords[te.index].increment);
+				instrument(te, Action.RSet(te.increment));
 			// else if e is the only incoming edge of w
 			} else if (Lists.length(e.target.incoming) == 1) {
 				ws.put(e.target);
 			} else {
 				// instrument(e, 'r=0')
-				plan.treeAction[te.index] = List.new(Action.RSet(0), plan.treeAction[te.index]);
+				instrument(te, Action.RSet(0));
 			}
 		});
 	});
 }
 
 // Pass 2, Fig. 8: memory increment code
-def placeCount(exit: CfgBlock, st: SpanningTree, plan: InstrPlan) {
+def placeCount(exit: CfgBlock, st: SpanningTree) {
 	def ws = Vector<CfgBlock>.new();
 	ws.put(exit);
 	Vectors.drain(ws, 0, fun (w: CfgBlock) {
@@ -306,14 +304,13 @@ def placeCount(exit: CfgBlock, st: SpanningTree, plan: InstrPlan) {
 			def te = st.edgeMap[e];
 			// if e is a chord edge
 			if (te.isChord) {
-				def inc = st.chords[te.index].increment;
 				// if e's instrumentation is 'r=Inc(e)'
-				if (Action.RSet.?(plan.chordAction[te.index])) {
+				if (te.actions.length > 0) {
 					// instrument(e, 'count[Inc(e)]++')
-					plan.chordAction[te.index] = Action.CountConst(inc);  // this is an optimization
+					reinstrument(te, Action.CountConst(te.increment));  // this is an optimization
 				} else {
 					// instrument(e, 'count[r+Inc(e)]++')
-					plan.chordAction[te.index] = Action.CountRPlus(inc);
+					instrument(te, Action.CountRPlus(te.increment));
 				}
 			} else {
 				def v = te.source;
@@ -323,69 +320,26 @@ def placeCount(exit: CfgBlock, st: SpanningTree, plan: InstrPlan) {
 				// else
 				} else {
 					// instrument(e, 'count[r]++')
-					plan.treeAction[te.index] = List.new(Action.CountR, plan.treeAction[te.index]);
+					instrument(te, Action.CountR);
 				}
 			}
 		});
 	});
 }
 // Pass 3, Fig. 8: register increment code
-def placeDefault(st: SpanningTree, plan: InstrPlan) {
-	// for all ______________ chords c
+def placeDefault(st: SpanningTree) {
+	// for all uninstrumented chords c
 	for (i < st.chords.length) {
-		// uninstrumented
-		if (Action.Nothing.?(plan.chordAction[i])) {
+		def te = st.chords[i];
+		if (te.actions.length == 0) {
 			// instrument(e, 'r+=Inc(e)')
-			plan.chordAction[i] = Action.RAdd(st.chords[i].increment);
+			instrument(te, Action.RAdd(te.increment));
 		}
 	}
 }
-def treeActions(plan: InstrPlan, i: int) -> Array<Action> {
-	return Lists.toArray(Lists.reverse(plan.treeAction[i])); // un-reverse back to pass order
-}
-// actions for a real edge, given its increment index or tree index (whichever applies)
-def actionsFor(st: SpanningTree, plan: InstrPlan, e: CfgEdge) -> Array<Action> {
-	def te = if(e == null, st.exitEdge, st.edgeMap[e]);
-	if (te.isChord) return [plan.chordAction[te.index]]; // fully resolved by placeInit/placeCount/placeDefault
-	return treeActions(plan, te.index);
-}
-// {e}'s own actions, plus every subsequent edge's actions along a single-successor chain. A block
-// with exactly one outgoing edge is never itself a runtime decision (no branch instruction reads
-// anything to choose it) and so is never separately probed; its action is always folded into
-// whichever decision dispatched control to it. Stops at the next real decision block (out-degree
-// > 1, which has/will have its own probe) or EXIT (out-degree 0 — the only such block, since every
-// real leaf gets a synthetic edge to it in onParse). Every real leaf funnels here via that
-// synthetic edge, so {exitAction} — the synthetic EXIT->ENTRY edge's own instrumentation
-// (Section 3.3), if any — is appended exactly once whenever a replay reaches EXIT.
-def replayFrom(st: SpanningTree, plan: InstrPlan, e: CfgEdge, exit: CfgBlock, exitAction: Array<Action>) -> Array<Action> {
-	def acc = Vector<Action>.new();
-	acc.puta(actionsFor(st, plan, e));
-	var cur = e.target;
-	while (Lists.length(cur.outgoing) == 1) {
-		def next = cur.outgoing.head;
-		acc.puta(actionsFor(st, plan, next));
-		cur = next.target;
-	}
-	if (cur == exit) appendExitAction(acc, exitAction);
-	return acc.extract();
-}
-// {exitAction}'s register-adjusting contribution is only correct if it runs BEFORE whatever
-// terminal count finalizes this path. If the last action already counted (skipping {r} entirely,
-// via chordCountVisited's optimization — Section 3.3), that count ran too early: undo it back to
-// the register op it was fused from, apply {exitAction}, then re-count generically via CountR.
-def appendExitAction(acc: Vector<Action>, exitAction: Array<Action>) {
-	if (exitAction.length == 0) return;
-	if (acc.length > 0) {
-		match (acc[acc.length - 1]) {
-			CountConst(value) => { acc[acc.length - 1] = Action.RSet(value); acc.puta(exitAction); acc.put(Action.CountR); return; }
-			CountRPlus(value) => { acc[acc.length - 1] = Action.RAdd(value); acc.puta(exitAction); acc.put(Action.CountR); return; }
-			CountR => { acc.resize(acc.length - 1); acc.puta(exitAction); acc.put(Action.CountR); return; }
-			_ => ;
-		}
-	}
-	acc.puta(exitAction);
-}
-def execActions(reg: RegState, acts: Array<Action>, counts: Array<int>) {
+// runs whatever Fig. 8 instrumented onto {te}, at the instruction that owns it
+def execEdge(reg: RegState, te: TreeEdge, counts: Array<int>) {
+	def acts = te.actions;
 	for (i < acts.length) {
 		match (acts[i]) {
 			RSet(value) => reg.r = value;
@@ -393,7 +347,6 @@ def execActions(reg: RegState, acts: Array<Action>, counts: Array<int>) {
 			CountR => counts[reg.r] = counts[reg.r] + 1;
 			CountConst(value) => counts[value] = counts[value] + 1;
 			CountRPlus(value) => counts[reg.r + value] = counts[reg.r + value] + 1;
-			Nothing => ; // never placed into an action list; only used as InstrPlan's unset sentinel
 		}
 	}
 }
@@ -420,19 +373,22 @@ private class RegState {
 	}
 }
 
-// place all real instrumentation for one acyclic function: an entry probe that zeroes {r}, and
-// one probe per decision pc (visited by walking the CFG directly) that dispatches to the taken
-// edge's action(s).
-def placeProbes(m: Module, func: FuncDecl, entry: CfgBlock, exit: CfgBlock, st: SpanningTree, plan: InstrPlan, counts: Array<int>) {
+// place all real instrumentation for one acyclic function. Every block owns an instruction control
+// cannot reach without entering it ({last_instr_pc}), so each block's outgoing edge(s) are
+// instrumented right there — exactly where Fig. 8 says, with nothing folded elsewhere. Runs BEFORE
+// the Fig. 8 passes: probes reference edges, so whatever those passes instrument is picked up with
+// no second pass to rebuild anything.
+def placeProbes(m: Module, func: FuncDecl, entry: CfgBlock, exit: CfgBlock, st: SpanningTree, counts: Array<int>) {
 	def reg = RegState.new(); // register for `r`
 
 	// insert entry probes
 	Instrumentation.insertFuncEntryProbe(m, func.func_index, EntryProbe.new(reg));
 
-	// insert exit probes
-	def exitProbe = PathExitProbe.new(reg);
-
-	// insert at explicit return instructions
+	// insert exit probes. Per Section 3.3 the synthetic EXIT->ENTRY chord's instrumentation is
+	// "placed in the EXIT vertex", which is where this probe runs; it also restores {r} for a
+	// recursive caller. Placed at every real return site plus the final byte, so exactly one fires
+	// per activation (a br out of the body lands on that final `end`).
+	def exitProbe = PathExitProbe.new(reg, st.exitEdge, counts);
 	def bi = BytecodeIterator.new().reset(func);
 	while (bi.more()) {
 		match (bi.current()) {
@@ -442,34 +398,31 @@ def placeProbes(m: Module, func: FuncDecl, entry: CfgBlock, exit: CfgBlock, st: 
 		}
 		bi.next();
 	}
-	// insert at end of function
 	Instrumentation.insertLocalProbe(m, func.func_index, func.cur_bytecode.length - 1, exitProbe);
 
-
-	// per Section 3.3: the synthetic EXIT->ENTRY edge is required for the Increment DFS, but has no
-	// real code location of its own; whatever its classification resolves to (a chord falls through
-	// to pass 3's default 'r+=Inc(c)', since it's never visited by placeInit/placeCount; a tree edge
-	// needs nothing) is placed unconditionally at EXIT instead.
-	def exitAction = actionsFor(st, plan, null);
-	// the instruction at a decision pc already says what kind of probe it needs; no need to infer
-	// BoolProbe-vs-TableProbe (or a chain's length) from CFG shape
 	def opBi = BytecodeIterator.new().reset(func);
 	entry.dfs(fun (b: CfgBlock) {
-		if (Lists.length(b.outgoing) <= 1) return; // not a genuine decision
-		def pc = b.outgoing.head.pc;
-		opBi.at(pc, -1);
+		def n = Lists.length(b.outgoing);
+		if (n == 0 || b.last_instr_pc < 0) return; // EXIT, or a block owning no instruction
+		if (n == 1) {
+			// entering {b} already commits to its one edge; no operand to read
+			def te = st.edgeMap[b.outgoing.head];
+			Instrumentation.insertLocalProbe(m, func.func_index, b.last_instr_pc, EdgeProbe.new(reg, te, counts));
+			return;
+		}
+		// a decision: {last_instr_pc} is the branch itself, which says what kind of probe it needs
+		opBi.at(b.last_instr_pc, -1);
 		if (opBi.current() == Opcode.BR_TABLE) {
-			// every label is now a direct edge out of {b} (Section 3.1's CFG->DAG fix); goto()
-			// prepends, so {b.outgoing} is in reverse label order
-			def n = opBi.immptr().read_labels().length;
-			def dispatch = Array<Array<Action>>.new(n);
-			var idx = n - 1;
-			for (l = b.outgoing; l != null; l = l.tail) dispatch[idx--] = replayFrom(st, plan, l.head, exit, exitAction);
-			Instrumentation.insertLocalProbe(m, func.func_index, pc, TableProbe.new(reg, dispatch, counts));
+			// every label is a direct edge out of {b} (Section 3.1's CFG->DAG fix); goto() prepends,
+			// so {b.outgoing} is in reverse label order
+			def labels = opBi.immptr().read_labels().length;
+			def dispatch = Array<TreeEdge>.new(labels);
+			var idx = labels - 1;
+			for (l = b.outgoing; l != null; l = l.tail) dispatch[idx--] = st.edgeMap[l.head];
+			Instrumentation.insertLocalProbe(m, func.func_index, b.last_instr_pc, TableProbe.new(reg, dispatch, counts));
 		} else {
-			def falseActs = replayFrom(st, plan, b.outgoing.head, exit, exitAction);
-			def trueActs = replayFrom(st, plan, b.outgoing.tail.head, exit, exitAction);
-			Instrumentation.insertLocalProbe(m, func.func_index, pc, BoolProbe.new(reg, falseActs, trueActs, counts));
+			def falseEdge = st.edgeMap[b.outgoing.head], trueEdge = st.edgeMap[b.outgoing.tail.head];
+			Instrumentation.insertLocalProbe(m, func.func_index, b.last_instr_pc, BoolProbe.new(reg, falseEdge, trueEdge, counts));
 		}
 	}, null, null);
 }
@@ -479,24 +432,34 @@ private class EntryProbe(reg: RegState) extends Probe {
 		return ProbeAction.Continue;
 	}
 }
-private class PathExitProbe(reg: RegState) extends Probe {
+// the EXIT vertex: runs the synthetic EXIT->ENTRY chord's instrumentation, then restores {r} for
+// a recursive caller
+private class PathExitProbe(reg: RegState, exitEdge: TreeEdge, counts: Array<int>) extends Probe {
 	def fire(loc: DynamicLoc) -> ProbeAction {
+		execEdge(reg, exitEdge, counts);
 		reg.leave();
 		return ProbeAction.Continue;
 	}
 }
-private class BoolProbe(reg: RegState, falseActs: Array<Action>, trueActs: Array<Action>, counts: Array<int>) extends Probe {
+// a block whose single outgoing edge is taken whenever the block is entered
+private class EdgeProbe(reg: RegState, te: TreeEdge, counts: Array<int>) extends Probe {
 	def fire(loc: DynamicLoc) -> ProbeAction {
-		def v = Values.unbox_u(loc.frame.getFrameAccessor().getOperand(0));
-		execActions(reg, if(v != 0, trueActs, falseActs), counts);
+		execEdge(reg, te, counts);
 		return ProbeAction.Continue;
 	}
 }
-private class TableProbe(reg: RegState, dispatch: Array<Array<Action>>, counts: Array<int>) extends Probe {
+private class BoolProbe(reg: RegState, falseEdge: TreeEdge, trueEdge: TreeEdge, counts: Array<int>) extends Probe {
+	def fire(loc: DynamicLoc) -> ProbeAction {
+		def v = Values.unbox_u(loc.frame.getFrameAccessor().getOperand(0));
+		execEdge(reg, if(v != 0, trueEdge, falseEdge), counts);
+		return ProbeAction.Continue;
+	}
+}
+private class TableProbe(reg: RegState, dispatch: Array<TreeEdge>, counts: Array<int>) extends Probe {
 	def fire(loc: DynamicLoc) -> ProbeAction {
 		def v = Values.unbox_u(loc.frame.getFrameAccessor().getOperand(0));
 		def idx = if(v >= u32.!(dispatch.length), dispatch.length - 1, int.!(v));
-		execActions(reg, dispatch[idx], counts);
+		execEdge(reg, dispatch[idx], counts);
 		return ProbeAction.Continue;
 	}
 }
