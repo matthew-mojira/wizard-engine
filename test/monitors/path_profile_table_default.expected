@@ -1,0 +1,6 @@
+func #0
+  counts[0] = 4
+  counts[1] = 0
+  counts[2] = 0
+func #1
+  counts[0] = 1

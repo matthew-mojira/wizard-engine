@@ -1,0 +1,7 @@
+func #0
+  counts[0] = 15
+  counts[1] = 23
+  counts[2] = 5
+  counts[3] = 17
+func #1
+  counts[0] = 1
