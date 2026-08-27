@@ -158,17 +158,6 @@ private class SpanningTree(tree: Array<TreeEdge>, chords: Array<TreeEdge>, exitE
 	}
 }
 
-// cost of the unique chord-free chain from ENTRY to {v} (0 if v has other than exactly one real
-// predecessor, i.e. no such unique chain exists). {uniquePred} maps a vertex to its sole incoming
-// TreeEdge, only when it has exactly one. Used only to break weight ties in kruskals: among several
-// edges tied for connecting a shared vertex into the tree, preferring the one whose source has the
-// lowest chain-cost keeps that source's own chord-free chain trivially zero-cost, so it never needs
-// an edge to carry a nonzero Val with no chord anywhere on its path to account for it.
-def pathValTo(uniquePred: HashMap<CfgBlock, TreeEdge>, v: CfgBlock) -> int {
-	def e = uniquePred[v];
-	if (e == null) return 0;
-	return pathValTo(uniquePred, e.source) + e.events;
-}
 // Using a spanning tree to select edges to instrument and compute the appropriate increment
 // for each instrumented edge: Section 3.3
 // maximum spanning tree (Kruskal's algorithm, via disjoint set) - maximizing tree weight
@@ -189,10 +178,6 @@ def kruskals(entry: CfgBlock, exit: CfgBlock) -> SpanningTree {
 		null,
 		null);
 
-	// add EXIT -> ENTRY edge
-	def exitTreeEdge = TreeEdge.new(exit, entry, null);
-	unsortedEdges.put(exitTreeEdge);
-
 	// disjoint set: each block maps to the set of blocks it belongs to
 	def disjointSet = HashMap<CfgBlock, HashSet<CfgBlock>>.new(CfgBlock.hash, CfgBlock.equals);
 
@@ -204,26 +189,26 @@ def kruskals(entry: CfgBlock, exit: CfgBlock) -> SpanningTree {
 		disjointSet[vertices[i]] = g;
 	}
 
-	// map a vertex to its sole incoming edge, only when it has exactly one (see pathValTo)
+	// sort E in decreasing order by weight(e)
 	def unsorted = unsortedEdges.extract();
-	def uniquePred = HashMap<CfgBlock, TreeEdge>.new(CfgBlock.hash, CfgBlock.equals);
-	def multiPred = HashSet<CfgBlock>.new(CfgBlock.hash, CfgBlock.equals);
-	for (te in unsorted) {
-		if (te.edge == null || multiPred.contains(te.target)) continue;
-		if (uniquePred[te.target] != null) { multiPred.add(te.target); uniquePred[te.target] = null; }
-		else uniquePred[te.target] = te;
-	}
-
-	// sort E in decreasing order by weight(e); ties broken by ascending pathValTo(source), so a
-	// chord-free chain never ends up needing to carry a nonzero Val on its own (see pathValTo)
 	def edges = Arrays.sort(unsorted, 0, unsorted.length,
-		fun (x: TreeEdge, y: TreeEdge) => x.weight > y.weight ||
-			(x.weight == y.weight && pathValTo(uniquePred, x.source) <= pathValTo(uniquePred, y.source)));
+		fun (x: TreeEdge, y: TreeEdge) => x.weight >= y.weight);
 
 	// T = {}
 	def tree = Vector<TreeEdge>.new();
 	// E - T
 	def chords = Vector<TreeEdge>.new();
+
+	// Seed T with the EXIT->ENTRY edge (cf. "Optimally Profiling and Tracing Programs")
+	// to prevent it from being recorded as a chord in the spanning tree
+	def exitTreeEdge = TreeEdge.new(exit, entry, null);
+	exitTreeEdge.isChord = false;
+	exitTreeEdge.index = tree.length;
+	tree.put(exitTreeEdge);
+	// UNION(FIND-SET(EXIT), FIND-SET(ENTRY))
+	def setExit = disjointSet[exit];
+	setExit.add(entry);
+	disjointSet[entry] = setExit;
 
 	// for each edge (u,v) in sorted E:
 	for (i < edges.length) {
@@ -384,11 +369,11 @@ def placeProbes(m: Module, func: FuncDecl, entry: CfgBlock, exit: CfgBlock, st: 
 	// insert entry probes
 	Instrumentation.insertFuncEntryProbe(m, func.func_index, EntryProbe.new(reg));
 
-	// insert exit probes. Per Section 3.3 the synthetic EXIT->ENTRY chord's instrumentation is
-	// "placed in the EXIT vertex", which is where this probe runs; it also restores {r} for a
-	// recursive caller. Placed at every real return site plus the final byte, so exactly one fires
-	// per activation (a br out of the body lands on that final `end`).
-	def exitProbe = PathExitProbe.new(reg, st.exitEdge, counts);
+	// insert exit probes. The EXIT->ENTRY edge is seeded into T (see kruskals), so it is never a
+	// chord and has no Increment to apply here -- this probe only restores {r} for a recursive
+	// caller. Placed at every real return site plus the final byte, so exactly one fires per
+	// activation (a br out of the body lands on that final `end`).
+	def exitProbe = PathExitProbe.new(reg);
 	def bi = BytecodeIterator.new().reset(func);
 	while (bi.more()) {
 		match (bi.current()) {
@@ -432,11 +417,10 @@ private class EntryProbe(reg: RegState) extends Probe {
 		return ProbeAction.Continue;
 	}
 }
-// the EXIT vertex: runs the synthetic EXIT->ENTRY chord's instrumentation, then restores {r} for
-// a recursive caller
-private class PathExitProbe(reg: RegState, exitEdge: TreeEdge, counts: Array<int>) extends Probe {
+// the EXIT vertex: restores {r} for a recursive caller. Carries no Fig. 8 instrumentation -- the
+// EXIT->ENTRY edge is seeded into the spanning tree, so it is never a chord.
+private class PathExitProbe(reg: RegState) extends Probe {
 	def fire(loc: DynamicLoc) -> ProbeAction {
-		execEdge(reg, exitEdge, counts);
 		reg.leave();
 		return ProbeAction.Continue;
 	}
