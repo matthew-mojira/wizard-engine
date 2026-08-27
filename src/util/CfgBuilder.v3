@@ -64,6 +64,10 @@ class CfgBuilder {
 			from.incoming = null;
 			return to;
 		}
+		// {from} is dead: nothing ever branched to it, e.g. the fallthrough block after an `if` whose
+		// arms all return. Same reachability guard as gotoExit -- linking it would put an edge in the
+		// graph that a traversal from {entry} never sees, so it would never be assigned a TreeEdge.
+		if (from != entry && from.incoming == null) return to;
 		from.goto(cs.pc, to);
 		return to;
 	}
