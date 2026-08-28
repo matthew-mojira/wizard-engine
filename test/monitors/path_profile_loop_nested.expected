@@ -1,0 +1,11 @@
+func #0
+  counts[0] = 2
+  counts[1] = 0
+  counts[2] = 1
+  counts[3] = 3
+  counts[4] = 3
+  counts[5] = 1
+  counts[6] = 0
+  counts[7] = 0
+func #1
+  counts[0] = 1
