@@ -50,15 +50,15 @@ class PathProfilingMonitor extends Monitor {
 		for (j < entries.length) {
 			def e = entries[j];
 			out.put1("func %q", e.func.render(module.names, _)).ln();
-			printCfg(e.cfg, e.st);
+			printCfg(out, e.cfg, e.st);
 			// the block sequence each path number denotes, so counts[k] can be read back to a route
 			def paths = enumPaths(e.cfg, e.exit, e.counts.length);
 			for (k < e.counts.length) {
-				Trace.OUT.put2("  counts[%d] = %d", k, e.counts[k]).ln();
+				out.put2("  counts[%d] = %d", k, e.counts[k]).ln();
 				if (paths != null && paths[k] != null) {
-					Trace.OUT.puts("      path:");
-					for (l = paths[k]; l != null; l = l.tail) Trace.OUT.put1(" %d", l.head);
-					Trace.OUT.ln();
+					out.puts("      path:");
+					for (l = paths[k]; l != null; l = l.tail) out.put1(" %d", l.head);
+					out.ln();
 				}
 			}
 		}
@@ -477,29 +477,29 @@ def walkPath(v: CfgBlock, exit: CfgBlock, sum: int, acc: List<int>, out: Array<L
 }
 
 // CFG + val(e) printing
-def printCfg(entry: CfgBlock, st: SpanningTree) {
+def printCfg(out: TraceBuilder, entry: CfgBlock, st: SpanningTree) {
 	def touched = Vector<CfgBlock>.new();
-	printCfgRec(entry, st, touched);
+	printCfgRec(out, entry, st, touched);
 	for (i < touched.length) touched[i].mark = 0;
 }
-def printCfgRec(b: CfgBlock, st: SpanningTree, touched: Vector<CfgBlock>) {
+def printCfgRec(out: TraceBuilder, b: CfgBlock, st: SpanningTree, touched: Vector<CfgBlock>) {
 	if (b == null || b.mark != 0) return;
 	b.mark = 1;
 	touched.put(b);
 	// {last_instr_pc} is the instruction this block owns -- where its outgoing edges are probed
-	Trace.OUT.put2("  block %d pc=%d", b.id, b.last_instr_pc).ln();
+	out.put2("  block %d pc=%d", b.id, b.last_instr_pc).ln();
 	// print all of this block's own edges first, so they aren't interleaved
 	// with a deeper block's edges once we recurse
 	Lists.apply(b.outgoing, fun (e: CfgEdge) {
 		def te = st.edgeMap[e];
 		// Increment(e) is defined for chords only; a tree edge carries none
 		if (te != null && te.isChord) {
-			Trace.OUT.put3("    -> block %d val=%d inc=%d", e.target.id, e.val, te.increment).ln();
+			out.put3("    -> block %d val=%d inc=%d", e.target.id, e.val, te.increment).ln();
 		} else {
-			Trace.OUT.put2("    -> block %d val=%d", e.target.id, e.val).ln();
+			out.put2("    -> block %d val=%d", e.target.id, e.val).ln();
 		}
 	});
-	Lists.apply(b.outgoing, fun (e: CfgEdge) { printCfgRec(e.target, st, touched); });
+	Lists.apply(b.outgoing, fun (e: CfgEdge) { printCfgRec(out, e.target, st, touched); });
 }
 
 // backedge detection
