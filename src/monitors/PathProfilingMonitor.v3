@@ -94,12 +94,13 @@ def assignVals(cfg: CfgBlock) {
 	}
 }
 
-// undirected edge candidate for the spanning tree; edge is null for the synthetic EXIT->ENTRY edge
-private class TreeEdge(source: CfgBlock, target: CfgBlock, edge: CfgEdge) {
+// undirected edge candidate for the spanning tree
+private class TreeEdge(edge: CfgEdge) {
+	def source = edge.source;
+	def target = edge.target;
 	def weight: int = 1; // Kruskal's maximizes total tree weight, to MINIMIZE total chord cost
 	var increment: int; // Increment(e), for chords only (Section 3.3)
-	// Events(f) = Val(f); 0 for the synthetic EXIT->ENTRY edge, which has no Val
-	def events: int = if(edge == null, 0, edge.val);
+	def events: int = edge.val; // Events(f) = Val(f)
 	// classification + position within SpanningTree.chords/tree, assigned by kruskals
 	var isChord: bool;
 	var index: int;
@@ -110,15 +111,15 @@ def hashCfgEdge(e: CfgEdge) -> int { return e.pc; }
 def equalsCfgEdge(a: CfgEdge, b: CfgEdge) -> bool { return a == b; }
 
 // T (tree) and E - T (chords)
-private class SpanningTree(tree: Array<TreeEdge>, chords: Array<TreeEdge>, exitEdge: TreeEdge) {
+private class SpanningTree(tree: Array<TreeEdge>, chords: Array<TreeEdge>) {
 	// maps a real CfgEdge to its TreeEdge, for O(1) chord/tree classification + index lookup
 	def edgeMap = HashMap<CfgEdge, TreeEdge>.new(hashCfgEdge, equalsCfgEdge);
 	// blocks which are marked to be instrumented
 	// Ball-Larus defines instrumentation along edges, so we attach it to the block in the source
 	def instrumented = HashSet<CfgBlock>.new(CfgBlock.hash, CfgBlock.equals);
 	new() {
-		for (te in tree) if (te.edge != null) edgeMap[te.edge] = te;
-		for (te in chords) if (te.edge != null) edgeMap[te.edge] = te;
+		for (te in tree) edgeMap[te.edge] = te;
+		for (te in chords) edgeMap[te.edge] = te;
 	}
 	// instrument an edge by marking its source block
 	def instrument(te: TreeEdge, a: Action) {
@@ -189,7 +190,7 @@ def kruskals(entry: CfgBlock, exit: CfgBlock) -> SpanningTree {
 			// V
 			vertices.put(b);
 			// E
-			Lists.apply(b.outgoing, fun (e: CfgEdge) { unsortedEdges.put(TreeEdge.new(b, e.target, e)); });
+			Lists.apply(b.outgoing, fun (e: CfgEdge) { unsortedEdges.put(TreeEdge.new(e)); });
 		},
 		null,
 		null);
@@ -217,7 +218,8 @@ def kruskals(entry: CfgBlock, exit: CfgBlock) -> SpanningTree {
 
 	// Seed T with the EXIT->ENTRY edge (cf. "Optimally Profiling and Tracing Programs")
 	// to prevent it from being recorded as a chord in the spanning tree
-	def exitTreeEdge = TreeEdge.new(exit, entry, null);
+	// detached from both edge lists: it is not part of the CFG, only of the spanning tree
+	def exitTreeEdge = TreeEdge.new(CfgEdge.new(-1, exit, entry));
 	exitTreeEdge.isChord = false;
 	exitTreeEdge.index = tree.length;
 	tree.put(exitTreeEdge);
@@ -247,7 +249,7 @@ def kruskals(entry: CfgBlock, exit: CfgBlock) -> SpanningTree {
 		}
 	}
 	// return T, E - T
-	return SpanningTree.new(tree.extract(), chords.extract(), exitTreeEdge);
+	return SpanningTree.new(tree.extract(), chords.extract());
 }
 
 // runtime actions an edge can carry, executed against the per-activation register {r} and the

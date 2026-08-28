@@ -57,9 +57,22 @@ class CfgBuilder {
 		// at {to} and leave it out of the graph entirely.
 		if (from.last_instr_pc < 0 && from != entry && from.incoming != null && from.outgoing == null) {
 			for (l = from.incoming; l != null; l = l.tail) {
-				def e = l.head;
-				e.target = to;
-				to.incoming = List.new(e, to.incoming);
+				def e = l.head, p = e.source;
+				// {outgoing} order is the branch's label order, which probes rely on, so splice {e}
+				// out in place: only the cells ahead of it are copied, the rest of the list is shared
+				var head = p.outgoing, pre: List<CfgEdge>;
+				while (head.head != e) {
+					pre = List.new(head.head, pre);
+					head = head.tail;
+				}
+				def n = CfgEdge.new(e.pc, p, to);
+				var out = List.new(n, head.tail);
+				while (pre != null) {
+					out = List.new(pre.head, out);
+					pre = pre.tail;
+				}
+				p.outgoing = out;
+				to.incoming = List.new(n, to.incoming);
 			}
 			from.incoming = null;
 			return to;
@@ -82,7 +95,8 @@ class CfgBuilder {
 def verbose = false;
 var labelId = 100;
 
-class CfgEdge(pc: int, var target: CfgBlock) {
+// {source} makes an edge self-describing, so a walk of {incoming} knows where the edge came from
+class CfgEdge(pc: int, source: CfgBlock, target: CfgBlock) {
 	var val: int; // weight assigned by Ball-Larus
 }
 
@@ -101,7 +115,7 @@ class CfgBlock(decl_pos: int) {
 	// links this CfgBlock with `t`
 	def goto(pc: int, t: CfgBlock) {
 		if (verbose) Trace.OUT.put2("add id:%d -> id:%d", this.id, t.id).ln();
-		var e = CfgEdge.new(pc, t);
+		var e = CfgEdge.new(pc, this, t);
 		outgoing = List.new(e, outgoing);
 		t.incoming = List.new(e, t.incoming);
 	}
