@@ -25,16 +25,29 @@ class CfgBuilder {
 		bi.dispatchLocalDecls(ctl_stack); // advance bi.pc past locals before ctl_stack.pc is read
 		while (bi.more()) {
 			ctl_stack.pc = bi.pc;
-			def before = ctl_stack.block, isEnd = bi.current() == Opcode.END;
-			bi.dispatch(ctl_stack);
-			// an `end` is a merge point: it belongs to the block it merges INTO, since every arm
-			// reaching it thereby enters that block. Every other instruction belongs to whatever
+			def before = ctl_stack.block, op = bi.current();
+			// `end` and `loop` are merge points, so they belong to the block they merge INTO:
+			// reaching one means entering that block. Every other instruction belongs to whatever
 			// block was current when it ran.
-			def owner = if(isEnd, ctl_stack.block, before);
+			def isMerge = op == Opcode.END || op == Opcode.LOOP;
+			bi.dispatch(ctl_stack);
+			def owner = if(isMerge, ctl_stack.block, before);
 			if (owner != null) owner.last_instr_pc = bi.pc;
 			bi.next();
 		}
 		gotoExit(ctl_stack, ctl_stack.block); // the block control falls out of the function from
+		// A function starting with `loop` leaves the entry block owning nothing, and it has no
+		// predecessors for mergeCfgBlock to retarget. Control enters its single successor
+		// unconditionally, so that successor is the real entry.
+		while (entry.last_instr_pc < 0 && entry.outgoing != null && entry.outgoing.tail == null) {
+			def e = entry.outgoing.head, succ = e.target;
+			var keep: List<CfgEdge>;
+			for (l = succ.incoming; l != null; l = l.tail) {
+				if (l.head != e) keep = List.new(l.head, keep);
+			}
+			succ.incoming = keep;
+			entry = succ;
+		}
 		return (entry, exit);
 	}
 	// links {b} to the exit vertex, if control cannot leave it any other way. {b} must be reachable:
@@ -51,6 +64,8 @@ class CfgBuilder {
 	// {cs.pc} rather than {bi.pc}: an edge deferred to a later instruction (the false edge of an if,
 	// which is not created until the else/end is reached) still belongs to the branch that chose it
 	private def mergeCfgBlock(cs: ControlStack<CfgBlock>, from: CfgBlock, to: CfgBlock) -> CfgBlock {
+		def wasBackedge = cs.backedge;
+		cs.backedge = false; // consume: only the edge created by this call is the backedge
 		if (from == null || cs.isUnreachable()) return to;
 		// {from} owns no instruction (an empty arm, or an empty block body), so there is nowhere to
 		// instrument its outgoing edge; it can only forward to {to}. Point its predecessors straight
@@ -66,6 +81,9 @@ class CfgBuilder {
 					head = head.tail;
 				}
 				def n = CfgEdge.new(e.pc, p, to);
+				// {from} forwards unconditionally, so the edge replacing {e} inherits the
+				// spliced-out {from}->{to} and becomes the backedge in its place.
+				n.isBackedge = wasBackedge;
 				var out = List.new(n, head.tail);
 				while (pre != null) {
 					out = List.new(pre.head, out);
@@ -81,7 +99,8 @@ class CfgBuilder {
 		// arms all return. Same reachability guard as gotoExit -- linking it would put an edge in the
 		// graph that a traversal from {entry} never sees, so it would never be assigned a TreeEdge.
 		if (from != entry && from.incoming == null) return to;
-		from.goto(cs.pc, to);
+		def e = from.goto(cs.pc, to);
+		e.isBackedge = wasBackedge;
 		return to;
 	}
 	private def bindCfgBlock(cs: ControlStack<CfgBlock>, pc: int, label: CfgBlock) {
@@ -98,6 +117,8 @@ var labelId = 100;
 // {source} makes an edge self-describing, so a walk of {incoming} knows where the edge came from
 class CfgEdge(pc: int, source: CfgBlock, target: CfgBlock) {
 	var val: int; // weight assigned by Ball-Larus
+	var isBackedge: bool; // branch to an enclosing loop label; excluded from the acyclic algorithms
+	var isDummy: bool;    // ENTRY->v or w->EXIT added by Section 4; carries a Val but no instruction
 }
 
 class CfgBlock(decl_pos: int) {
@@ -111,13 +132,18 @@ class CfgBlock(decl_pos: int) {
 	var incoming: List<CfgEdge>;
 	var mark: int;
 	var numPaths: int; // Ball-Larus NumPaths(v): number of paths from this vertex to EXIT
+	// Section 4 step 1's dummy edges, at most one of each per vertex; null if this is not a
+	// backedge target / source. Their increments fold into the backedge's instrumentation.
+	var entryDummy: CfgEdge; // ENTRY->this
+	var exitDummy: CfgEdge;  // this->EXIT
 
 	// links this CfgBlock with `t`
-	def goto(pc: int, t: CfgBlock) {
+	def goto(pc: int, t: CfgBlock) -> CfgEdge {
 		if (verbose) Trace.OUT.put2("add id:%d -> id:%d", this.id, t.id).ln();
 		var e = CfgEdge.new(pc, this, t);
 		outgoing = List.new(e, outgoing);
 		t.incoming = List.new(e, t.incoming);
+		return e;
 	}
 	def hash() -> int {
 		return id;

@@ -9,6 +9,9 @@
 class ControlStack<B> extends BytecodeVisitor {
 	// Set by the user to track the current bytecode position.
 	var pc: int;
+	// Set when the edge about to be created is a backedge (a branch to an enclosing loop label).
+	// Consumed by the next {mergeBlock}, which is the call that actually creates the edge.
+	var backedge: bool;
 	// Creates a new empty label which is tracked in the control stack.
 	var newLabel: (ControlStack<B>) -> B = ControlStack<B>.defaultNewLabel;
 	// Creates a new empty block which is not part of the control stack.
@@ -135,6 +138,7 @@ class ControlStack<B> extends BytecodeVisitor {
 		var from = block;
 		for (depth in labels) {
 			var to = getEntry(depth);
+			backedge = to.isLoop();
 			to.label = mergeBlock(this, from, to.label);
 		}
 		setUnreachable();
@@ -216,6 +220,7 @@ class ControlStack<B> extends BytecodeVisitor {
 	private def br(depth: u31) {
 		var from = stack.peek();
 		var to = stack.elems[stack.top - depth - 1];
+		backedge = to.isLoop();
 		to.label = mergeBlock(this, block, to.label);
 		from.reachable = false;
 		block = newBlock(this);
@@ -223,6 +228,7 @@ class ControlStack<B> extends BytecodeVisitor {
 	private def brIf(depth: u31) {
 		var from = stack.peek();
 		var to = stack.elems[stack.top - depth - 1];
+		backedge = to.isLoop();
 		var t = splitBlockInto(this, block, to.label);
 		to.label = t.0;
 		block = t.1;

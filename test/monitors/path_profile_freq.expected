@@ -31,3 +31,12 @@ func #0
   counts[29] = 24
   counts[30] = 16
   counts[31] = 32
+func #1
+  counts[0] = 31
+  counts[1] = 0
+  counts[2] = 1
+  counts[3] = 496
+  counts[4] = 32
+  counts[5] = 1
+  counts[6] = 0
+  counts[7] = 0
