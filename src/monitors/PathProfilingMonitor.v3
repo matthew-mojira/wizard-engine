@@ -17,7 +17,7 @@ class PathProfilingMonitor extends Monitor {
 			// (Section 4) general CFG -> DAG: dummy edges around each backedge. Backedges are then
 			// excluded from every acyclic computation below (they stay in {outgoing} because the
 			// branch that takes one still has to be dispatched at runtime).
-			def selfLoops = addDummies(cfg, exit);
+			addDummies(cfg, exit);
 
 			// (Section 3.2) assign values to edges to make sums across all paths unique
 
@@ -39,10 +39,10 @@ class PathProfilingMonitor extends Monitor {
 			// backedges: [count[r]++; r=0], with the dummies' increments folded in.
 			// (Section 4.1) self-loops instead get a plain iteration counter, past the path counts.
 			def numPaths = cfg.numPaths;
-			placeBackedges(st, numPaths);
+			placeBackedges(st);
 
 			// place probes, covering the edges each decision dispatches to
-			def counts: Array<int> = Array<int>.new(numPaths + selfLoops.length);
+			def counts: Array<int> = Array<int>.new(numPaths);
 			placeProbes(m, func, cfg, exit, st, counts);
 
 			entries.put(PathProfileEntry.new(m, func, cfg, exit, st, counts, numPaths));
@@ -63,14 +63,12 @@ class PathProfilingMonitor extends Monitor {
 					out.ln();
 				}
 			}
-			// (Section 4.1) a self-loop is counted, not path-profiled. Walks {backedges} in the same
-			// order placeBackedges assigned the slots, so the two agree by construction.
-			var slot = e.numPaths;
+			// (Section 4.1) a self-loop is counted, not path-profiled. One line per self-loop edge,
+			// naming the branch arm that reaches it.
 			for (te in e.st.backedges) {
 				if (te.source != te.target) continue;
-				out.put3("  selfloop[block %d pc=%d] = %d", te.source.id,
-					te.source.last_instr_pc, e.counts[slot]).ln();
-				slot++;
+				out.put2("  selfloop[block %d pc=%d", te.source.id, te.source.last_instr_pc);
+				out.put2(" arm %d] = %d", te.dispatchIndex, te.selfLoopCount).ln();
 			}
 		}
 	}
@@ -84,18 +82,13 @@ private class PathProfileEntry(module: Module, func: FuncDecl, cfg: CfgBlock, ex
 }
 
 // Section 4 step 1: a dummy ENTRY->v per backedge target, a dummy w->EXIT per backedge source.
-// Step 2 is by exclusion, not deletion. Returns the self-loops, counted not profiled (Section 4.1).
-def addDummies(entry: CfgBlock, exit: CfgBlock) -> Array<CfgEdge> {
-	def selfLoops = Vector<CfgEdge>.new();
+// Step 2 is by exclusion, not deletion. (Section 4.1) a self-loop neither reinitializes {r} nor
+// increments a path counter, so its dummies would correspond to nothing -- the {source}/{target}
+// tests below exclude it.
+def addDummies(entry: CfgBlock, exit: CfgBlock) {
 	// post-order: goto() below prepends to {b.outgoing}, which the dfs has finished walking by then.
 	// Each block is visited once and asks only about itself, so neither dummy needs deduplicating.
 	entry.dfs(null, null, fun (b: CfgBlock) {
-		// (Section 4.1) a self-loop neither reinitializes {r} nor increments a counter, so its
-		// dummies would correspond to nothing; it takes none
-		for (l = b.outgoing; l != null; l = l.tail) {
-			def e = l.head;
-			if (e.isBackedge && e.target == b) selfLoops.put(e);
-		}
 		// target of a backedge
 		for (l = b.incoming; l != null; l = l.tail) {
 			def e = l.head;
@@ -117,7 +110,6 @@ def addDummies(entry: CfgBlock, exit: CfgBlock) -> Array<CfgEdge> {
 			}
 		}
 	});
-	return selfLoops.extract();
 }
 
 // Val(e) / NumPaths(v) assignment (Ball-Larus). Algorithm for assigning values to edges in a DAG, Fig. 5
@@ -160,6 +152,12 @@ private class TreeEdge(edge: CfgEdge) {
 	var index: int;
 	// instrumentation for this edge
 	var action: Action;
+	// (Section 4.1) runtime trip count, for a self-loop only. Monitor state, so it lives here rather
+	// than on the CfgEdge -- the CFG is a static structure shared with other consumers.
+	var selfLoopCount: int;
+	// which successor of {source} the branch selects to reach this edge: the br_table label index,
+	// or 0/1 (fallthrough/taken) for a two-way branch. Reported so a self-loop names its arms.
+	var dispatchIndex: int;
 }
 def hashCfgEdge(e: CfgEdge) -> int { return e.pc; }
 def equalsCfgEdge(a: CfgEdge, b: CfgEdge) -> bool { return a == b; }
@@ -331,6 +329,7 @@ private type Action {
 	case CountRPlus(value: int); // counts[r + value]++
 	// Section 4's [count[r]++; r=0] on a backedge, with the two dummy edges' increments folded in
 	case CountReset(add: int, set: int); // counts[r + add]++ ; r = set
+	case SelfLoop;               // (Section 4.1) this edge's own trip counter, not a path count
 }
 
 // Pass 1, Fig. 8: register initialization code
@@ -406,12 +405,10 @@ def placeDefault(st: SpanningTree) {
 }
 // (Section 4) instrument each backedge with [count[r]++; r=0], combining in the increments of its
 // two dummy edges. (Section 4.1) a self-loop instead counts its iterations, past the path counts.
-def placeBackedges(st: SpanningTree, numPaths: int) {
-	var selfSlot = numPaths;
+def placeBackedges(st: SpanningTree) {
 	for (te in st.backedges) {
 		if (te.source == te.target) {
-			st.instrument(te, Action.CountConst(selfSlot));
-			selfSlot++;
+			st.instrument(te, Action.SelfLoop);
 			continue;
 		}
 		// the loop bottom's ->EXIT dummy increments the counter, the loop head's ENTRY-> dummy
@@ -433,6 +430,7 @@ def execEdge(reg: RegState, te: TreeEdge, counts: Array<int>) {
 		CountConst(value) => counts[value] = counts[value] + 1;
 		CountRPlus(value) => counts[reg.r + value] = counts[reg.r + value] + 1;
 		CountReset(add, set) => { counts[reg.r + add] = counts[reg.r + add] + 1; reg.r = set; }
+		SelfLoop => te.selfLoopCount = te.selfLoopCount + 1;
 	}
 }
 // {r} is the running path register for one function; recursive re-entry pushes the caller's {r}
@@ -522,6 +520,8 @@ def placeProbes(m: Module, func: FuncDecl, entry: CfgBlock, exit: CfgBlock, st: 
 			_ => edges = [st.edgeMap[real.head], st.edgeMap[real.tail.head]];
 		}
 		if (edges == null) continue;
+		// one edge per label, so this is a bijection: every edge learns the arm that selects it
+		for (k < edges.length) edges[k].dispatchIndex = k;
 		Instrumentation.insertLocalProbe(m, func.func_index, b.last_instr_pc, BranchProbe.new(reg, op, edges, counts));
 	}
 }
