@@ -4,12 +4,10 @@ def monitor_ = MonitorRegistry.add(
 	PathProfilingMonitor.new());
 
 class PathProfilingMonitor extends Monitor {
-	var module: Module;
 	def entries = Vector<PathProfileEntry>.new();
 	def cfgBuilder = CfgBuilder.new();
 
 	def onParse(m: Module, err: ErrorGen) {
-		module = m;
 		for (j < m.functions.length) {
 			def func: FuncDecl = m.functions[j];
 			if (func.imp != null) continue; // skip imported functions
@@ -47,13 +45,13 @@ class PathProfilingMonitor extends Monitor {
 			def counts: Array<int> = Array<int>.new(numPaths + selfLoops.length);
 			placeProbes(m, func, cfg, exit, st, counts);
 
-			entries.put(PathProfileEntry.new(func, cfg, exit, st, counts, numPaths));
+			entries.put(PathProfileEntry.new(m, func, cfg, exit, st, counts, numPaths));
 		}
 	}
 	def onFinish(i: Instance, r: Result) {
 		for (j < entries.length) {
 			def e = entries[j];
-			out.put1("func %q", e.func.render(module.names, _)).ln();
+			out.put1("func %q", e.func.render(e.module.names, _)).ln();
 			printCfg(out, e.cfg, e.st);
 			// the block sequence each path number denotes, so counts[k] can be read back to a route
 			def paths = enumPaths(e.cfg, e.exit, e.numPaths);
@@ -78,8 +76,10 @@ class PathProfilingMonitor extends Monitor {
 	}
 }
 
-private class PathProfileEntry(func: FuncDecl, cfg: CfgBlock, exit: CfgBlock, st: SpanningTree,
-	counts: Array<int>, numPaths: int) {
+// {module} is per-entry, not a monitor field: onParse runs once per module while {entries}
+// accumulates across all of them, so a shared field would render every name against the last one
+private class PathProfileEntry(module: Module, func: FuncDecl, cfg: CfgBlock, exit: CfgBlock,
+	st: SpanningTree, counts: Array<int>, numPaths: int) {
 	// TODO this counts is caller-independent, where we probably want it also indexed by caller (location)
 }
 
@@ -397,7 +397,7 @@ def placeDefault(st: SpanningTree) {
 	// for all uninstrumented chords c
 	for (i < st.chords.length) {
 		def te = st.chords[i];
-		if (te.edge != null && te.edge.isDummy) continue; // folded into its backedge instead
+		if (te.edge.isDummy) continue; // folded into its backedge instead
 		if (Action.Nothing.?(te.action)) {
 			// instrument(e, 'r+=Inc(e)')
 			st.instrument(te, Action.RAdd(te.increment));
@@ -458,11 +458,10 @@ private class RegState {
 	}
 }
 
-// place all real instrumentation for one acyclic function. Every block owns an instruction control
-// cannot reach without entering it ({last_instr_pc}), so each block's outgoing edge(s) are
-// instrumented right there — exactly where Fig. 8 says, with nothing folded elsewhere. Runs BEFORE
-// the Fig. 8 passes: probes reference edges, so whatever those passes instrument is picked up with
-// no second pass to rebuild anything.
+// place all real instrumentation for one function. Every block owns an instruction control cannot
+// reach without entering it ({last_instr_pc}), so each block's outgoing edge(s) are instrumented
+// right there — exactly where Fig. 8 says, with nothing folded elsewhere. Runs AFTER the Fig. 8
+// passes and placeBackedges, since it reads the {st.instrumented} set they populate.
 def placeProbes(m: Module, func: FuncDecl, entry: CfgBlock, exit: CfgBlock, st: SpanningTree, counts: Array<int>) {
 	def reg = RegState.new(); // register for `r`
 
@@ -500,20 +499,30 @@ def placeProbes(m: Module, func: FuncDecl, entry: CfgBlock, exit: CfgBlock, st: 
 			Instrumentation.insertLocalProbe(m, func.func_index, b.last_instr_pc, EdgeProbe.new(reg, te, counts));
 			continue;
 		}
-		// a decision: {last_instr_pc} is the branch itself, which says what kind of probe it needs
+		// a decision: {last_instr_pc} is the branch itself, and its opcode says how the probe reads
+		// the operand that selects the successor
 		bi.at(b.last_instr_pc, -1);
-		if (bi.current() == Opcode.BR_TABLE) {
+		def op = bi.current();
+		var edges: Array<TreeEdge>;
+		match (op) {
 			// every label is a direct edge out of {b} (Section 3.1's CFG->DAG fix); goto() prepends,
 			// so {b.outgoing} is in reverse label order
-			def labels = bi.immptr().read_labels().length;
-			def dispatch = Array<TreeEdge>.new(labels);
-			var idx = labels - 1;
-			for (l = real; l != null; l = l.tail) dispatch[idx--] = st.edgeMap[l.head];
-			Instrumentation.insertLocalProbe(m, func.func_index, b.last_instr_pc, TableProbe.new(reg, dispatch, counts));
-		} else {
-			def falseEdge = st.edgeMap[real.head], trueEdge = st.edgeMap[real.tail.head];
-			Instrumentation.insertLocalProbe(m, func.func_index, b.last_instr_pc, BoolProbe.new(reg, falseEdge, trueEdge, counts));
+			BR_TABLE => {
+				def labels = bi.immptr().read_labels().length;
+				edges = Array<TreeEdge>.new(labels);
+				var idx = labels - 1;
+				for (l = real; l != null; l = l.tail) edges[idx--] = st.edgeMap[l.head];
+			}
+			// br_on_cast/br_on_cast_fail branch on a type test the probe cannot evaluate from the
+			// operand alone, so leave them uninstrumented rather than guess (path_profiling_issues.md)
+			BR_ON_CAST => ;
+			BR_ON_CAST_FAIL => ;
+			// splitBlockInto creates the taken edge first and goto() prepends, so {real} is
+			// [fallthrough, taken] -- the order BranchProbe indexes by outcome
+			_ => edges = [st.edgeMap[real.head], st.edgeMap[real.tail.head]];
 		}
+		if (edges == null) continue;
+		Instrumentation.insertLocalProbe(m, func.func_index, b.last_instr_pc, BranchProbe.new(reg, op, edges, counts));
 	}
 }
 private class EntryProbe(reg: RegState) extends Probe {
@@ -537,18 +546,23 @@ private class EdgeProbe(reg: RegState, te: TreeEdge, counts: Array<int>) extends
 		return ProbeAction.Continue;
 	}
 }
-private class BoolProbe(reg: RegState, falseEdge: TreeEdge, trueEdge: TreeEdge, counts: Array<int>) extends Probe {
+// a decision block: every branch that ends one picks its successor from the top of the operand
+// stack, so {op} says how to read that value. {edges} is indexed by outcome -- for a two-way branch
+// [fallthrough, taken], and for br_table the labels in order, the last being the default.
+private class BranchProbe(reg: RegState, op: Opcode, edges: Array<TreeEdge>, counts: Array<int>) extends Probe {
 	def fire(loc: DynamicLoc) -> ProbeAction {
-		def v = Values.unbox_u(loc.frame.getFrameAccessor().getOperand(0));
-		execEdge(reg, if(v != 0, trueEdge, falseEdge), counts);
-		return ProbeAction.Continue;
-	}
-}
-private class TableProbe(reg: RegState, dispatch: Array<TreeEdge>, counts: Array<int>) extends Probe {
-	def fire(loc: DynamicLoc) -> ProbeAction {
-		def v = Values.unbox_u(loc.frame.getFrameAccessor().getOperand(0));
-		def idx = if(v >= u32.!(dispatch.length), dispatch.length - 1, int.!(v));
-		execEdge(reg, dispatch[idx], counts);
+		def v = loc.frame.getFrameAccessor().getOperand(0);
+		var idx: int;
+		match (op) {
+			BR_TABLE => {
+				def u = Values.unbox_u(v);
+				idx = if(u >= u32.!(edges.length), edges.length - 1, int.!(u));
+			}
+			BR_ON_NULL => idx = if(Values.isNull(v), 1, 0);
+			BR_ON_NON_NULL => idx = if(Values.isNull(v), 0, 1);
+			_ => idx = if(Values.unbox_u(v) != 0, 1, 0); // br_if and the br_on_* that read an i32
+		}
+		execEdge(reg, edges[idx], counts);
 		return ProbeAction.Continue;
 	}
 }
@@ -594,7 +608,7 @@ def printCfgRec(out: TraceBuilder, b: CfgBlock, st: SpanningTree, touched: Vecto
 	Lists.apply(b.outgoing, fun (e: CfgEdge) {
 		def te = st.edgeMap[e];
 		// Increment(e) is defined for chords only; a tree edge carries none
-		if (te != null && te.isChord) {
+		if (te.isChord) {
 			out.put3("    -> block %d val=%d inc=%d", e.target.id, e.val, te.increment);
 		} else {
 			out.put2("    -> block %d val=%d", e.target.id, e.val);

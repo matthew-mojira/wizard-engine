@@ -12,7 +12,9 @@ class CfgBuilder {
 		ctl_stack.newLabel = newCfgBlock;
 		ctl_stack.mergeBlock = mergeCfgBlock;
 		ctl_stack.bindLabel = bindCfgBlock;
-		ctl_stack.endBlock = gotoExit;
+		// deliberately NOT bound to gotoExit: endBlock fires from setUnreachable, i.e. for
+		// `unreachable`/`throw`/`rethrow`/`throw_ref`, where control never reaches EXIT. Linking
+		// those to EXIT would record a trapped execution as a completed path.
 	}
 
 	// builds the CFG for {func}, returning (entry, exit). {exit} is the function's outermost label —
@@ -30,9 +32,11 @@ class CfgBuilder {
 			// reaching one means entering that block. Every other instruction belongs to whatever
 			// block was current when it ran.
 			def isMerge = op == Opcode.END || op == Opcode.LOOP;
+			// claim {before} BEFORE dispatching: a branch merges its own block, and the empty-block
+			// splice in mergeCfgBlock must not mistake it for a block that owns nothing.
+			if (!isMerge && before != null) before.last_instr_pc = bi.pc;
 			bi.dispatch(ctl_stack);
-			def owner = if(isMerge, ctl_stack.block, before);
-			if (owner != null) owner.last_instr_pc = bi.pc;
+			if (isMerge && ctl_stack.block != null) ctl_stack.block.last_instr_pc = bi.pc;
 			bi.next();
 		}
 		gotoExit(ctl_stack, ctl_stack.block); // the block control falls out of the function from
