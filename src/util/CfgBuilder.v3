@@ -3,6 +3,10 @@
 
 // Builds a control flow graph for a function.
 class CfgBuilder {
+	// override to build a graph out of subclasses carrying consumer state
+	var newBlock: int -> CfgBlock = CfgBlock.new;
+	var newEdge: (int, CfgBlock, CfgBlock) -> CfgEdge = CfgEdge.new;
+
 	private def bi = BytecodeIterator.new();
 	private def ctl_stack = ControlStack<CfgBlock>.new();
 	private var entry: CfgBlock;
@@ -12,14 +16,9 @@ class CfgBuilder {
 		ctl_stack.newLabel = newCfgBlock;
 		ctl_stack.mergeBlock = mergeCfgBlock;
 		ctl_stack.bindLabel = bindCfgBlock;
-		// deliberately NOT bound to gotoExit: endBlock fires from setUnreachable, i.e. for
-		// `unreachable`/`throw`/`rethrow`/`throw_ref`, where control never reaches EXIT. Linking
-		// those to EXIT would record a trapped execution as a completed path.
 	}
 
-	// builds the CFG for {func}, returning (entry, exit). {exit} is the function's outermost label —
-	// the block the final `end` targets, and where every `return` and `br` out of the body already
-	// converges — so no synthetic vertex is needed to represent leaving the function.
+	// {exit} is the function's outermost label, which the final `end` targets.
 	def build(func: FuncDecl) -> (CfgBlock, CfgBlock) {
 		entry = ctl_stack.reset();
 		exit = ctl_stack.getEntry(0).label;
@@ -28,82 +27,34 @@ class CfgBuilder {
 		while (bi.more()) {
 			ctl_stack.pc = bi.pc;
 			def before = ctl_stack.block, op = bi.current();
-			// `end` and `loop` are merge points, so they belong to the block they merge INTO:
-			// reaching one means entering that block. Every other instruction belongs to whatever
-			// block was current when it ran.
+			// an `end` or `loop` is a merge point and belongs to the block it merges into
 			def isMerge = op == Opcode.END || op == Opcode.LOOP;
-			// claim {before} BEFORE dispatching: a branch merges its own block, and the empty-block
-			// splice in mergeCfgBlock must not mistake it for a block that owns nothing.
-			if (!isMerge && before != null) before.last_instr_pc = bi.pc;
 			bi.dispatch(ctl_stack);
-			if (isMerge && ctl_stack.block != null) ctl_stack.block.last_instr_pc = bi.pc;
+			def owner = if(isMerge, ctl_stack.block, before);
+			if (owner != null) owner.last_instr_pc = bi.pc;
 			bi.next();
-		}
-		gotoExit(ctl_stack, ctl_stack.block); // the block control falls out of the function from
-		// A function starting with `loop` leaves the entry block owning nothing, and it has no
-		// predecessors for mergeCfgBlock to retarget. Control enters its single successor
-		// unconditionally, so that successor is the real entry.
-		while (entry.last_instr_pc < 0 && entry.outgoing != null && entry.outgoing.tail == null) {
-			def e = entry.outgoing.head, succ = e.target;
-			var keep: List<CfgEdge>;
-			for (l = succ.incoming; l != null; l = l.tail) {
-				if (l.head != e) keep = List.new(l.head, keep);
-			}
-			succ.incoming = keep;
-			entry = succ;
 		}
 		return (entry, exit);
 	}
-	// links {b} to the exit vertex, if control cannot leave it any other way. {b} must be reachable:
-	// a label nothing ever branched to (e.g. the fallthrough block when every path returns) is dead,
-	// and linking it would put an edge in the graph that a traversal from {entry} never sees.
-	private def gotoExit(cs: ControlStack<CfgBlock>, b: CfgBlock) {
-		if (b == null || b == exit || b.outgoing != null) return;
-		if (b != entry && b.incoming == null) return;
-		b.goto(-1, exit);
+	// prepends, so {outgoing} is in reverse branch-label order
+	def link(pc: int, from: CfgBlock, to: CfgBlock) -> CfgEdge {
+		if (verbose) Trace.OUT.put2("add id:%d -> id:%d", from.id, to.id).ln();
+		def e = newEdge(pc, from, to);
+		from.outgoing = List.new(e, from.outgoing);
+		to.incoming = List.new(e, to.incoming);
+		return e;
 	}
 	private def newCfgBlock(cs: ControlStack<CfgBlock>) -> CfgBlock {
-		return if(cs.isUnreachable(), null, CfgBlock.new(cs.pc));
+		return if(cs.isUnreachable(), null, newBlock(cs.pc));
 	}
-	// {cs.pc} rather than {bi.pc}: an edge deferred to a later instruction (the false edge of an if,
-	// which is not created until the else/end is reached) still belongs to the branch that chose it
+	// a deferred edge takes {cs.pc} so that it still belongs to the branch that chose it
 	private def mergeCfgBlock(cs: ControlStack<CfgBlock>, from: CfgBlock, to: CfgBlock) -> CfgBlock {
 		def wasBackedge = cs.backedge;
-		cs.backedge = false; // consume: only the edge created by this call is the backedge
+		cs.backedge = false; // only the edge created by this call is the backedge
 		if (from == null || cs.isUnreachable()) return to;
-		// {from} owns no instruction (an empty arm, or an empty block body), so there is nowhere to
-		// instrument its outgoing edge; it can only forward to {to}. Point its predecessors straight
-		// at {to} and leave it out of the graph entirely.
-		if (from.last_instr_pc < 0 && from != entry && from.incoming != null && from.outgoing == null) {
-			for (l = from.incoming; l != null; l = l.tail) {
-				def e = l.head, p = e.source;
-				// {outgoing} order is the branch's label order, which probes rely on, so splice {e}
-				// out in place: only the cells ahead of it are copied, the rest of the list is shared
-				var head = p.outgoing, pre: List<CfgEdge>;
-				while (head.head != e) {
-					pre = List.new(head.head, pre);
-					head = head.tail;
-				}
-				def n = CfgEdge.new(e.pc, p, to);
-				// {from} forwards unconditionally, so the edge replacing {e} inherits the
-				// spliced-out {from}->{to} and becomes the backedge in its place.
-				n.isBackedge = wasBackedge;
-				var out = List.new(n, head.tail);
-				while (pre != null) {
-					out = List.new(pre.head, out);
-					pre = pre.tail;
-				}
-				p.outgoing = out;
-				to.incoming = List.new(n, to.incoming);
-			}
-			from.incoming = null;
-			return to;
-		}
-		// {from} is dead: nothing ever branched to it, e.g. the fallthrough block after an `if` whose
-		// arms all return. Same reachability guard as gotoExit -- linking it would put an edge in the
-		// graph that a traversal from {entry} never sees, so it would never be assigned a TreeEdge.
+		// {from} is dead because nothing ever branched to it
 		if (from != entry && from.incoming == null) return to;
-		def e = from.goto(cs.pc, to);
+		def e = link(cs.pc, from, to);
 		e.isBackedge = wasBackedge;
 		return to;
 	}
@@ -118,37 +69,18 @@ class CfgBuilder {
 def verbose = false;
 var labelId = 100;
 
-// {source} makes an edge self-describing, so a walk of {incoming} knows where the edge came from
 class CfgEdge(pc: int, source: CfgBlock, target: CfgBlock) {
-	var val: int; // weight assigned by Ball-Larus
-	var isBackedge: bool; // branch to an enclosing loop label; excluded from the acyclic algorithms
-	var isDummy: bool;    // ENTRY->v or w->EXIT added by Section 4; carries a Val but no instruction
+	var isBackedge: bool; // branches to an enclosing loop label
 }
 
 class CfgBlock(decl_pos: int) {
 	def id = labelId++;
 	var bind_pos: int = -1;
-	// pc of the last instruction this block owns — an instruction control cannot reach without
-	// entering this block, so it is where the block's outgoing edge(s) are instrumented. For a
-	// decision block this is the branch itself. < 0 only if the block owns no instruction at all.
-	var last_instr_pc: int = -1;
+	var last_instr_pc: int = -1; // last instruction this block owns, or < 0 when it owns none
 	var outgoing: List<CfgEdge>;
 	var incoming: List<CfgEdge>;
 	var mark: int;
-	var numPaths: int; // Ball-Larus NumPaths(v): number of paths from this vertex to EXIT
-	// Section 4 step 1's dummy edges, at most one of each per vertex; null if this is not a
-	// backedge target / source. Their increments fold into the backedge's instrumentation.
-	var entryDummy: CfgEdge; // ENTRY->this
-	var exitDummy: CfgEdge;  // this->EXIT
 
-	// links this CfgBlock with `t`
-	def goto(pc: int, t: CfgBlock) -> CfgEdge {
-		if (verbose) Trace.OUT.put2("add id:%d -> id:%d", this.id, t.id).ln();
-		var e = CfgEdge.new(pc, this, t);
-		outgoing = List.new(e, outgoing);
-		t.incoming = List.new(e, t.incoming);
-		return e;
-	}
 	def hash() -> int {
 		return id;
 	}
@@ -157,8 +89,7 @@ class CfgBlock(decl_pos: int) {
 	}
 
 	def dfs<R>(pre: CfgBlock -> R, onEdge: CfgEdge -> R, post: CfgBlock -> R) {
-		// XXX visited set tracks blocks only for the unmarking
-		// actually checking if the block is visited is done through `mark` field
+		// XXX visited tracks blocks only for the unmarking, since {mark} is the visited check
 		def visited = Vector<CfgBlock>.new();
 
 		dfs0(pre, onEdge, post, visited);

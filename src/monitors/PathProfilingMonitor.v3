@@ -5,19 +5,33 @@ def monitor_ = MonitorRegistry.add(
 
 class PathProfilingMonitor extends Monitor {
 	def entries = Vector<PathProfileEntry>.new();
-	def cfgBuilder = CfgBuilder.new();
+	// the graph this monitor analyses is built from its own node types, so all Ball-Larus state
+	// lives on the nodes and none of it reaches CfgBuilder's
+	def cfgBuilder = newPathCfgBuilder();
 
 	def onParse(m: Module, err: ErrorGen) {
 		for (j < m.functions.length) {
 			def func: FuncDecl = m.functions[j];
 			if (func.imp != null) continue; // skip imported functions
+			// a br_on_cast branches on a subtype test that no probe can evaluate from the operand,
+			// so its counts would come out too low. Report nothing rather than wrong numbers.
+			if (hasUnprofilableBranch(func)) continue;
 			def cfgExit = cfgBuilder.build(func);
-			def cfg = cfgExit.0, exit = cfgExit.1;
+			def exit = cfgExit.1;
+
+			// Ball-Larus needs every path to end at one EXIT vertex, so a `return` needs an edge
+			// there. The CFG does not have one -- a return leaves the function rather than entering
+			// another block -- so this monitor adds them.
+			addReturnEdges(cfgBuilder, func, cfgExit.0, exit);
+			// Fig. 8 instruments a block at the instruction it owns, so every block must own one --
+			// and ENTRY in particular.
+			spliceEmptyBlocks(cfgExit.0, exit);
+			def cfg = advanceEntry(cfgExit.0);
 
 			// (Section 4) general CFG -> DAG: dummy edges around each backedge. Backedges are then
 			// excluded from every acyclic computation below (they stay in {outgoing} because the
 			// branch that takes one still has to be dispatched at runtime).
-			addDummies(cfg, exit);
+			addDummies(cfgBuilder, cfg, exit);
 
 			// (Section 3.2) assign values to edges to make sums across all paths unique
 
@@ -38,7 +52,7 @@ class PathProfilingMonitor extends Monitor {
 
 			// backedges: [count[r]++; r=0], with the dummies' increments folded in.
 			// (Section 4.1) self-loops instead get a plain iteration counter, past the path counts.
-			def numPaths = cfg.numPaths;
+			def numPaths = pb(cfg).numPaths;
 			placeBackedges(st);
 
 			// place probes, covering the edges each decision dispatches to
@@ -81,21 +95,58 @@ private class PathProfileEntry(module: Module, func: FuncDecl, cfg: CfgBlock, ex
 	// TODO this counts is caller-independent, where we probably want it also indexed by caller (location)
 }
 
+// the CFG nodes this monitor analyses, carrying its own Ball-Larus state
+private class PathBlock extends CfgBlock {
+	new(pc: int) super(pc) { }
+	var numPaths: int; // NumPaths(v): number of paths from this vertex to EXIT
+	// Section 4 step 1's dummy edges, at most one of each per vertex; null if this is not a
+	// backedge target / source. Their increments fold into the backedge's instrumentation.
+	var entryDummy: PathEdge; // ENTRY->this
+	var exitDummy: PathEdge;  // this->EXIT
+}
+private class PathEdge extends CfgEdge {
+	new(pc: int, source: CfgBlock, target: CfgBlock) super(pc, source, target) { }
+	var val: int;      // Val(e), the weight assigned by Fig. 5; also Events(e) in Fig. 4
+	var isDummy: bool; // added by Section 4 step 1; carries a Val but no instruction
+	def weight: int = 1; // Kruskal's maximizes total tree weight, to MINIMIZE total chord cost
+	var increment: int;  // Increment(e), for chords only (Section 3.3)
+	// classification + position within SpanningTree.chords/tree, assigned by kruskals
+	var isChord: bool;
+	var index: int;
+	// instrumentation for this edge
+	var action: Action;
+	// (Section 4.1) runtime trip count, for a self-loop only
+	var selfLoopCount: int;
+	// which successor of {source} the branch selects to reach this edge: the br_table label index,
+	// or 0/1 (fallthrough/taken) for a two-way branch. Reported so a self-loop names its arms.
+	var dispatchIndex: int;
+}
+// {b} and {e} as this monitor's node types. Every node in its graph is one, since its CfgBuilder
+// is wired to construct them.
+def pb(b: CfgBlock) -> PathBlock { return PathBlock.!(b); }
+def pe(e: CfgEdge) -> PathEdge { return PathEdge.!(e); }
+def newPathCfgBuilder() -> CfgBuilder {
+	def b = CfgBuilder.new();
+	b.newBlock = PathBlock.new;
+	b.newEdge = PathEdge.new;
+	return b;
+}
+
 // Section 4 step 1: a dummy ENTRY->v per backedge target, a dummy w->EXIT per backedge source.
 // Step 2 is by exclusion, not deletion. (Section 4.1) a self-loop neither reinitializes {r} nor
 // increments a path counter, so its dummies would correspond to nothing -- the {source}/{target}
 // tests below exclude it.
-def addDummies(entry: CfgBlock, exit: CfgBlock) {
-	// post-order: goto() below prepends to {b.outgoing}, which the dfs has finished walking by then.
+def addDummies(cb: CfgBuilder, entry: CfgBlock, exit: CfgBlock) {
+	// post-order: link below prepends to {b.outgoing}, which the dfs has finished walking by then.
 	// Each block is visited once and asks only about itself, so neither dummy needs deduplicating.
 	entry.dfs(null, null, fun (b: CfgBlock) {
 		// target of a backedge
 		for (l = b.incoming; l != null; l = l.tail) {
 			def e = l.head;
 			if (e.isBackedge && e.source != b && b != entry) {
-				def d = entry.goto(-1, b);
+				def d = pe(cb.link(-1, entry, b));
 				d.isDummy = true;
-				b.entryDummy = d;
+				pb(b).entryDummy = d;
 				break;
 			}
 		}
@@ -103,11 +154,100 @@ def addDummies(entry: CfgBlock, exit: CfgBlock) {
 		for (l = b.outgoing; l != null; l = l.tail) {
 			def e = l.head;
 			if (e.isBackedge && e.target != b && b != exit) {
-				def d = b.goto(-1, exit);
+				def d = pe(cb.link(-1, b, exit));
 				d.isDummy = true;
-				b.exitDummy = d;
+				pb(b).exitDummy = d;
 				break;
 			}
+		}
+	});
+}
+// A block owning no instruction has nowhere to carry its outgoing edge's instrumentation, so
+// Fig. 8 cannot use it. It forwards unconditionally, so remove it: point each predecessor straight
+// at its single successor. One pass suffices for a chain of empty blocks either way round -- if the
+// predecessor is processed first it lands on the next block, which is then itself removed; if the
+// successor goes first, the predecessor lands directly past it.
+def spliceEmptyBlocks(entry: CfgBlock, exit: CfgBlock) {
+	def blocks = Vector<CfgBlock>.new();
+	entry.dfs(blocks.put, null, null);
+	for (i < blocks.length) {
+		def b = blocks[i];
+		if (b == entry || b == exit || b.last_instr_pc >= 0) continue;
+		if (b.incoming == null || b.outgoing == null || b.outgoing.tail != null) continue;
+		def out = b.outgoing.head, to = out.target;
+		for (l = b.incoming; l != null; l = l.tail) {
+			def e = l.head, p = e.source;
+			// {outgoing} order is the branch's label order, which probes rely on, so splice {e}
+			// out in place: only the cells ahead of it are copied, the rest of the list is shared
+			var head = p.outgoing, pre: List<CfgEdge>;
+			while (head.head != e) {
+				pre = List.new(head.head, pre);
+				head = head.tail;
+			}
+			def n = PathEdge.new(e.pc, p, to);
+			// {b} forwards unconditionally, so the edge replacing {e} inherits {b}->{to} and
+			// becomes the backedge in its place
+			n.isBackedge = out.isBackedge;
+			var rebuilt = List.new(n, head.tail);
+			while (pre != null) {
+				rebuilt = List.new(pre.head, rebuilt);
+				pre = pre.tail;
+			}
+			p.outgoing = rebuilt;
+			to.incoming = List.new(n, to.incoming);
+		}
+		// {b}->{to} is orphaned now that nothing reaches {b}
+		var keep: List<CfgEdge>;
+		for (l = to.incoming; l != null; l = l.tail) {
+			if (l.head != out) keep = List.new(l.head, keep);
+		}
+		to.incoming = keep;
+		b.incoming = null;
+		b.outgoing = null;
+	}
+}
+// A function starting with `loop` leaves ENTRY owning no instruction, since that opcode belongs to
+// the loop header it merges into. Fig. 8 needs ENTRY to own one, and control enters ENTRY's single
+// successor unconditionally, so that successor is the real entry. Drops the edge between them,
+// which no longer has a source in the graph.
+def advanceEntry(entry: CfgBlock) -> CfgBlock {
+	var b = entry;
+	while (b.last_instr_pc < 0 && b.outgoing != null && b.outgoing.tail == null) {
+		def e = b.outgoing.head, succ = e.target;
+		var keep: List<CfgEdge>;
+		for (l = succ.incoming; l != null; l = l.tail) {
+			if (l.head != e) keep = List.new(l.head, keep);
+		}
+		succ.incoming = keep;
+		b = succ;
+	}
+	return b;
+}
+def hasUnprofilableBranch(func: FuncDecl) -> bool {
+	def bi = BytecodeIterator.new().reset(func);
+	while (bi.more()) {
+		match (bi.current()) {
+			BR_ON_CAST, BR_ON_CAST_FAIL => return true;
+			_ => ;
+		}
+		bi.next();
+	}
+	return false;
+}
+// Control that leaves the function reaches no successor, so a block ending in `return` has no
+// outgoing edge. Ball-Larus needs it to reach EXIT, so link it here. A block ending in
+// `unreachable`/`throw` also has no successor, but it TRAPS -- it never reaches EXIT, and linking
+// it would record a trapped execution as a completed path.
+def addReturnEdges(cb: CfgBuilder, func: FuncDecl, entry: CfgBlock, exit: CfgBlock) {
+	def bi = BytecodeIterator.new().reset(func);
+	// post-order, as addDummies: linking prepends to {b.outgoing}, and the dfs has finished
+	// walking it by then, so it never traverses an edge created during its own walk
+	entry.dfs(null, null, fun (b: CfgBlock) {
+		if (b.outgoing != null || b == exit || b.last_instr_pc < 0) return;
+		bi.at(b.last_instr_pc, -1);
+		match (bi.current()) {
+			RETURN, RETURN_CALL, RETURN_CALL_INDIRECT => cb.link(b.last_instr_pc, b, exit);
+			_ => ;
 		}
 	});
 }
@@ -121,7 +261,7 @@ def assignVals(cfg: CfgBlock, exit: CfgBlock) {
 
 	// for each vertex v in reverse topological order
 	for (i < order.length) {
-		def v = order[i];
+		def v = pb(order[i]);
 		// if v is a leaf vertex. Fig. 5's leaf is EXIT itself; a vertex that merely has no
 		// successors may be one that never reaches EXIT, whose paths never complete.
 		if (v == exit) {
@@ -129,10 +269,10 @@ def assignVals(cfg: CfgBlock, exit: CfgBlock) {
 		} else {
 			v.numPaths = 0;
 			// for each edge e = v -> w
-			Lists.apply(v.outgoing, fun (e: CfgEdge) {
+			Lists.apply(v.outgoing, fun (c: CfgEdge) {
 				// skip backedges to convert CFG to DAG (Section 4)
-				if (e.isBackedge) return;
-				def w = e.target;
+				if (c.isBackedge) return;
+				def e = pe(c), w = pb(c.target);
 				e.val = v.numPaths;
 				v.numPaths = v.numPaths + w.numPaths;
 			});
@@ -140,42 +280,13 @@ def assignVals(cfg: CfgBlock, exit: CfgBlock) {
 	}
 }
 
-// undirected edge candidate for the spanning tree
-private class TreeEdge(edge: CfgEdge) {
-	def source = edge.source;
-	def target = edge.target;
-	def weight: int = 1; // Kruskal's maximizes total tree weight, to MINIMIZE total chord cost
-	var increment: int; // Increment(e), for chords only (Section 3.3)
-	def events: int = edge.val; // Events(f) = Val(f)
-	// classification + position within SpanningTree.chords/tree, assigned by kruskals
-	var isChord: bool;
-	var index: int;
-	// instrumentation for this edge
-	var action: Action;
-	// (Section 4.1) runtime trip count, for a self-loop only. Monitor state, so it lives here rather
-	// than on the CfgEdge -- the CFG is a static structure shared with other consumers.
-	var selfLoopCount: int;
-	// which successor of {source} the branch selects to reach this edge: the br_table label index,
-	// or 0/1 (fallthrough/taken) for a two-way branch. Reported so a self-loop names its arms.
-	var dispatchIndex: int;
-}
-def hashCfgEdge(e: CfgEdge) -> int { return e.pc; }
-def equalsCfgEdge(a: CfgEdge, b: CfgEdge) -> bool { return a == b; }
-
 // T (tree) and E - T (chords)
-private class SpanningTree(tree: Array<TreeEdge>, chords: Array<TreeEdge>, backedges: Array<TreeEdge>) {
-	// maps a real CfgEdge to its TreeEdge, for O(1) chord/tree classification + index lookup
-	def edgeMap = HashMap<CfgEdge, TreeEdge>.new(hashCfgEdge, equalsCfgEdge);
+private class SpanningTree(tree: Array<PathEdge>, chords: Array<PathEdge>, backedges: Array<PathEdge>) {
 	// blocks which are marked to be instrumented
 	// Ball-Larus defines instrumentation along edges, so we attach it to the block in the source
 	def instrumented = HashSet<CfgBlock>.new(CfgBlock.hash, CfgBlock.equals);
-	new() {
-		for (te in tree) edgeMap[te.edge] = te;
-		for (te in chords) edgeMap[te.edge] = te;
-		for (te in backedges) edgeMap[te.edge] = te;
-	}
 	// instrument an edge by marking its source block
-	def instrument(te: TreeEdge, a: Action) {
+	def instrument(te: PathEdge, a: Action) {
 		instrumented.add(te.source);
 		te.action = a;
 	}
@@ -190,19 +301,19 @@ private class SpanningTree(tree: Array<TreeEdge>, chords: Array<TreeEdge>, backe
 		for (j < chords.length) {
 			def e = chords[j];
 			// Increment(e) := Increment(e) + Events(e)
-			e.increment = e.increment + e.events;
+			e.increment = e.increment + e.val;
 		}
 	}
 
 	// DFS procedure, Fig. 4
-	private def dfs(events: int, v: CfgBlock, e: TreeEdge) {
+	private def dfs(events: int, v: CfgBlock, e: PathEdge) {
 		// for each f in T:
 		for (i < tree.length) {
 			def f = tree[i];
 			// f != e and v = tgt(f)
 			if (f != e && v == f.target)
 				// DFS(Dir(e,f)*events + Events(f), src(f), f)
-				dfs(dir(e, f) * events + f.events, f.source, f);
+				dfs(dir(e, f) * events + f.val, f.source, f);
 		}
 		// for each f in T:
 		for (i < tree.length) {
@@ -210,7 +321,7 @@ private class SpanningTree(tree: Array<TreeEdge>, chords: Array<TreeEdge>, backe
 			// f != e and v = src(f)
 			if (f != e && v == f.source)
 				// DFS(Dir(e,f)*events + Events(f), tgt(f), f)
-				dfs(dir(e, f) * events + f.events, f.target, f);
+				dfs(dir(e, f) * events + f.val, f.target, f);
 		}
 		// for each f in E - T:
 		for (j < chords.length) {
@@ -220,7 +331,7 @@ private class SpanningTree(tree: Array<TreeEdge>, chords: Array<TreeEdge>, backe
 		}
 	}
 	// Dir function, Fig. 4: 1 if e and f point the same direction (or e is NULL), else -1
-	private def dir(e: TreeEdge, other: TreeEdge) -> int {
+	private def dir(e: PathEdge, other: PathEdge) -> int {
 		// precondition: e and f share a common endpoint
 		if (e == null) return 1;
 		if (e.source == other.target || e.target == other.source) return 1; // e and f in same direction
@@ -236,19 +347,19 @@ def kruskals(entry: CfgBlock, exit: CfgBlock) -> SpanningTree {
 	// V
 	def vertices = Vector<CfgBlock>.new();
 	// E
-	def unsortedEdges = Vector<TreeEdge>.new();
-	def backedges = Vector<TreeEdge>.new();
+	def unsortedEdges = Vector<PathEdge>.new();
+	def backedges = Vector<PathEdge>.new();
 	// initialize V and E
 	entry.dfs(
 		fun (b: CfgBlock) {
 			// V
 			vertices.put(b);
 			// E
-			Lists.apply(b.outgoing, fun (e: CfgEdge) {
-				def te = TreeEdge.new(e);
+			Lists.apply(b.outgoing, fun (c: CfgEdge) {
+				def e = pe(c);
 				// skip backedges to convert CFG to DAG (Section 4)
-				if (e.isBackedge) backedges.put(te);
-				else unsortedEdges.put(te);
+				if (e.isBackedge) backedges.put(e);
+				else unsortedEdges.put(e);
 			});
 		},
 		null,
@@ -275,20 +386,20 @@ def kruskals(entry: CfgBlock, exit: CfgBlock) -> SpanningTree {
 	// sort E in decreasing order by weight(e)
 	def unsorted = unsortedEdges.extract();
 	def edges = Arrays.sort(unsorted, 0, unsorted.length,
-		fun (x: TreeEdge, y: TreeEdge) => x.weight >= y.weight);
+		fun (x: PathEdge, y: PathEdge) => x.weight >= y.weight);
 
 	// T = {}
-	def tree = Vector<TreeEdge>.new();
+	def tree = Vector<PathEdge>.new();
 	// E - T
-	def chords = Vector<TreeEdge>.new();
+	def chords = Vector<PathEdge>.new();
 
 	// Seed T with the EXIT->ENTRY edge (cf. "Optimally Profiling and Tracing Programs")
 	// to prevent it from being recorded as a chord in the spanning tree
 	// detached from both edge lists: it is not part of the CFG, only of the spanning tree
-	def exitTreeEdge = TreeEdge.new(CfgEdge.new(-1, exit, entry));
-	exitTreeEdge.isChord = false;
-	exitTreeEdge.index = tree.length;
-	tree.put(exitTreeEdge);
+	def exitPathEdge = PathEdge.new(-1, exit, entry);
+	exitPathEdge.isChord = false;
+	exitPathEdge.index = tree.length;
+	tree.put(exitPathEdge);
 	// UNION(FIND-SET(EXIT), FIND-SET(ENTRY))
 	def setExit = disjointSet[exit];
 	setExit.add(entry);
@@ -338,20 +449,20 @@ def placeInit(entry: CfgBlock, st: SpanningTree) {
 	ws.put(entry);
 	Vectors.drain(ws, 0, fun (v: CfgBlock) {
 		// for each edge e = v -> w
-		Lists.apply(v.outgoing, fun (e: CfgEdge) {
+		Lists.apply(v.outgoing, fun (c: CfgEdge) {
+			def e = pe(c);
 			// skip backedges to convert CFG to DAG (Section 4)
 			if (e.isBackedge || e.isDummy) return;
-			def te = st.edgeMap[e];
 			// if e is a chord edge
-			if (te.isChord) {
+			if (e.isChord) {
 				// instrument(e, 'r=Inc(e)')
-				st.instrument(te, Action.RSet(te.increment));
+				st.instrument(e, Action.RSet(e.increment));
 			// else if e is the only incoming edge of w
 			} else if (Lists.length(e.target.incoming) == 1) {
 				ws.put(e.target);
 			} else {
 				// instrument(e, 'r=0')
-				st.instrument(te, Action.RSet(0));
+				st.instrument(e, Action.RSet(0));
 			}
 		});
 	});
@@ -363,29 +474,29 @@ def placeCount(exit: CfgBlock, st: SpanningTree) {
 	ws.put(exit);
 	Vectors.drain(ws, 0, fun (w: CfgBlock) {
 		// for each edge e = v -> w
-		Lists.apply(w.incoming, fun (e: CfgEdge) {
+		Lists.apply(w.incoming, fun (c: CfgEdge) {
+			def e = pe(c);
 			// skip backedges to convert CFG to DAG (Section 4)
 			if (e.isBackedge || e.isDummy) return;
-			def te = st.edgeMap[e];
 			// if e is a chord edge
-			if (te.isChord) {
+			if (e.isChord) {
 				// if e's instrumentation is 'r=Inc(e)'
-				if (Action.RSet.?(te.action)) {
+				if (Action.RSet.?(e.action)) {
 					// instrument(e, 'count[Inc(e)]++')
-					st.instrument(te, Action.CountConst(te.increment));  // this is an optimization
+					st.instrument(e, Action.CountConst(e.increment));  // this is an optimization
 				} else {
 					// instrument(e, 'count[r+Inc(e)]++')
-					st.instrument(te, Action.CountRPlus(te.increment));
+					st.instrument(e, Action.CountRPlus(e.increment));
 				}
 			} else {
-				def v = te.source;
+				def v = e.source;
 				// else if e is the only outgoing edge of v
 				if (Lists.length(v.outgoing) == 1) {
 					ws.put(v);
 				// else
 				} else {
 					// instrument(e, 'count[r]++')
-					st.instrument(te, Action.CountR);
+					st.instrument(e, Action.CountR);
 				}
 			}
 		});
@@ -396,7 +507,7 @@ def placeDefault(st: SpanningTree) {
 	// for all uninstrumented chords c
 	for (i < st.chords.length) {
 		def te = st.chords[i];
-		if (te.edge.isDummy) continue; // folded into its backedge instead
+		if (te.isDummy) continue; // folded into its backedge instead
 		if (Action.Nothing.?(te.action)) {
 			// instrument(e, 'r+=Inc(e)')
 			st.instrument(te, Action.RAdd(te.increment));
@@ -413,15 +524,15 @@ def placeBackedges(st: SpanningTree) {
 		}
 		// the loop bottom's ->EXIT dummy increments the counter, the loop head's ENTRY-> dummy
 		// reinitializes {r}; a dummy in the spanning tree has increment 0, as does an absent one
-		def ex = te.source.exitDummy, en = te.target.entryDummy;
+		def ex = pb(te.source).exitDummy, en = pb(te.target).entryDummy;
 		st.instrument(te, Action.CountReset(
-			if(ex == null, 0, st.edgeMap[ex].increment),
-			if(en == null, 0, st.edgeMap[en].increment)));
+			if(ex == null, 0, ex.increment),
+			if(en == null, 0, en.increment)));
 	}
 }
 
 // runs whatever Fig. 8 instrumented onto {te}, at the instruction that owns it
-def execEdge(reg: RegState, te: TreeEdge, counts: Array<int>) {
+def execEdge(reg: RegState, te: PathEdge, counts: Array<int>) {
 	match (te.action) {
 		Nothing => ;
 		RSet(value) => reg.r = value;
@@ -488,12 +599,12 @@ def placeProbes(m: Module, func: FuncDecl, entry: CfgBlock, exit: CfgBlock, st: 
 		def b = blocks[i];
 		// skip dummy edges on the outgoing edge set
 		var real = b.outgoing;
-		while (real != null && real.head.isDummy) real = real.tail;
+		while (real != null && pe(real.head).isDummy) real = real.tail;
 		def n = Lists.length(real);
 		if (n == 0) continue; // EXIT, or a block whose only edges are dummies
 		if (n == 1) {
 			// entering {b} already commits to its one edge; no operand to read
-			def te = st.edgeMap[real.head];
+			def te = pe(real.head);
 			Instrumentation.insertLocalProbe(m, func.func_index, b.last_instr_pc, EdgeProbe.new(reg, te, counts));
 			continue;
 		}
@@ -501,25 +612,20 @@ def placeProbes(m: Module, func: FuncDecl, entry: CfgBlock, exit: CfgBlock, st: 
 		// the operand that selects the successor
 		bi.at(b.last_instr_pc, -1);
 		def op = bi.current();
-		var edges: Array<TreeEdge>;
+		var edges: Array<PathEdge>;
 		match (op) {
 			// every label is a direct edge out of {b} (Section 3.1's CFG->DAG fix); goto() prepends,
 			// so {b.outgoing} is in reverse label order
 			BR_TABLE => {
 				def labels = bi.immptr().read_labels().length;
-				edges = Array<TreeEdge>.new(labels);
+				edges = Array<PathEdge>.new(labels);
 				var idx = labels - 1;
-				for (l = real; l != null; l = l.tail) edges[idx--] = st.edgeMap[l.head];
+				for (l = real; l != null; l = l.tail) edges[idx--] = pe(l.head);
 			}
-			// br_on_cast/br_on_cast_fail branch on a type test the probe cannot evaluate from the
-			// operand alone, so leave them uninstrumented rather than guess (path_profiling_issues.md)
-			BR_ON_CAST => ;
-			BR_ON_CAST_FAIL => ;
 			// splitBlockInto creates the taken edge first and goto() prepends, so {real} is
 			// [fallthrough, taken] -- the order BranchProbe indexes by outcome
-			_ => edges = [st.edgeMap[real.head], st.edgeMap[real.tail.head]];
+			_ => edges = [pe(real.head), pe(real.tail.head)];
 		}
-		if (edges == null) continue;
 		// one edge per label, so this is a bijection: every edge learns the arm that selects it
 		for (k < edges.length) edges[k].dispatchIndex = k;
 		Instrumentation.insertLocalProbe(m, func.func_index, b.last_instr_pc, BranchProbe.new(reg, op, edges, counts));
@@ -540,7 +646,7 @@ private class ExitProbe(reg: RegState) extends Probe {
 	}
 }
 // a block whose single outgoing edge is taken whenever the block is entered
-private class EdgeProbe(reg: RegState, te: TreeEdge, counts: Array<int>) extends Probe {
+private class EdgeProbe(reg: RegState, te: PathEdge, counts: Array<int>) extends Probe {
 	def fire(loc: DynamicLoc) -> ProbeAction {
 		execEdge(reg, te, counts);
 		return ProbeAction.Continue;
@@ -549,7 +655,7 @@ private class EdgeProbe(reg: RegState, te: TreeEdge, counts: Array<int>) extends
 // a decision block: every branch that ends one picks its successor from the top of the operand
 // stack, so {op} says how to read that value. {edges} is indexed by outcome -- for a two-way branch
 // [fallthrough, taken], and for br_table the labels in order, the last being the default.
-private class BranchProbe(reg: RegState, op: Opcode, edges: Array<TreeEdge>, counts: Array<int>) extends Probe {
+private class BranchProbe(reg: RegState, op: Opcode, edges: Array<PathEdge>, counts: Array<int>) extends Probe {
 	def fire(loc: DynamicLoc) -> ProbeAction {
 		def v = loc.frame.getFrameAccessor().getOperand(0);
 		var idx: int;
@@ -587,7 +693,7 @@ def walkPath(v: CfgBlock, exit: CfgBlock, sum: int, acc: List<int>, out: Array<L
 		def e = l.head;
 		// skip backedges to convert CFG to DAG (Section 4)
 		if (e.isBackedge) continue;
-		walkPath(e.target, exit, sum + e.val, here, out);
+		walkPath(e.target, exit, sum + pe(e).val, here, out);
 	}
 }
 
@@ -605,11 +711,11 @@ def printCfgRec(out: TraceBuilder, b: CfgBlock, st: SpanningTree, touched: Vecto
 	out.put2("  block %d pc=%d", b.id, b.last_instr_pc).ln();
 	// print all of this block's own edges first, so they aren't interleaved
 	// with a deeper block's edges once we recurse
-	Lists.apply(b.outgoing, fun (e: CfgEdge) {
-		def te = st.edgeMap[e];
+	Lists.apply(b.outgoing, fun (c: CfgEdge) {
+		def e = pe(c);
 		// Increment(e) is defined for chords only; a tree edge carries none
-		if (te.isChord) {
-			out.put3("    -> block %d val=%d inc=%d", e.target.id, e.val, te.increment);
+		if (e.isChord) {
+			out.put3("    -> block %d val=%d inc=%d", e.target.id, e.val, e.increment);
 		} else {
 			out.put2("    -> block %d val=%d", e.target.id, e.val);
 		}

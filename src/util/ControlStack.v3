@@ -143,16 +143,18 @@ class ControlStack<B> extends BytecodeVisitor {
 		}
 		setUnreachable();
 	}
-	// a return is a branch to the function's outermost label, per the Wasm spec; going through
-	// br() gives it a real edge carrying the return instruction's own pc
+	// a return leaves the function: the block ends and control does not reach any successor here.
+	// Routing it through br() would instead merge into the outermost label's block, giving an edge
+	// to a block whose instruction the returning execution never runs. A consumer that wants an
+	// EXIT vertex adds those edges itself.
 	def visit_RETURN() {
-		br(u31.!(stack.top - 1));
+		setUnreachable();
 	}
 	def visit_RETURN_CALL(func_index: u31) {
-		br(u31.!(stack.top - 1));
+		setUnreachable();
 	}
 	def visit_RETURN_CALL_INDIRECT(sig_index: u31, table_index: u31) {
-		br(u31.!(stack.top - 1));
+		setUnreachable();
 	}
 	def visit_BR_ON_NULL(label: u31) {
 		brIf(label);
