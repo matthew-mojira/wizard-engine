@@ -1,0 +1,11 @@
+(module
+  (table $t 1 funcref)
+  (func (export "_start")
+    (call $countdown (i32.const 5000))
+  )
+  (func $countdown (param i32)
+    (drop (table.get $t (i32.const 0)))
+    (if (local.get 0)
+      (then (call $countdown (i32.sub (local.get 0) (i32.const 1)))))
+  )
+)
