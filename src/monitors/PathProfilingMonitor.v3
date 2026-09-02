@@ -13,24 +13,16 @@ class PathProfilingMonitor extends Monitor {
 		for (j < m.functions.length) {
 			def func: FuncDecl = m.functions[j];
 			if (func.imp != null) continue; // skip imported functions
-			// a br_on_cast branches on a subtype test that no probe can evaluate from the operand,
-			// so its counts would come out too low. Report nothing rather than wrong numbers.
-			if (hasUnprofilableBranch(func)) continue;
 			def cfgExit = cfgBuilder.build(func);
 			def exit = cfgExit.1;
 
-			// Ball-Larus needs every path to end at one EXIT vertex, so a `return` needs an edge
-			// there. The CFG does not have one -- a return leaves the function rather than entering
-			// another block -- so this monitor adds them.
+			// every path must end at EXIT, so route all `return`s to EXIT
 			addReturnEdges(cfgBuilder, func, cfgExit.0, exit);
-			// Fig. 8 instruments a block at the instruction it owns, so every block must own one --
-			// and ENTRY in particular.
+			// remove empty blocks so that remaining blocks have an instruction to increment
 			spliceEmptyBlocks(cfgExit.0, exit);
 			def cfg = advanceEntry(cfgExit.0);
 
-			// (Section 4) general CFG -> DAG: dummy edges around each backedge. Backedges are then
-			// excluded from every acyclic computation below (they stay in {outgoing} because the
-			// branch that takes one still has to be dispatched at runtime).
+			// (Section 4) general CFG to DAG, by dummy edges around each backedge
 			addDummies(cfgBuilder, cfg, exit);
 
 			// (Section 3.2) assign values to edges to make sums across all paths unique
@@ -52,7 +44,7 @@ class PathProfilingMonitor extends Monitor {
 
 			// backedges: [count[r]++; r=0], with the dummies' increments folded in.
 			// (Section 4.1) self-loops instead get a plain iteration counter, past the path counts.
-			def numPaths = pb(cfg).numPaths;
+			def numPaths = PathBlock.!(cfg).numPaths;
 			placeBackedges(st);
 
 			// place probes, covering the edges each decision dispatches to
@@ -121,10 +113,7 @@ private class PathEdge extends CfgEdge {
 	// or 0/1 (fallthrough/taken) for a two-way branch. Reported so a self-loop names its arms.
 	var dispatchIndex: int;
 }
-// {b} and {e} as this monitor's node types. Every node in its graph is one, since its CfgBuilder
-// is wired to construct them.
-def pb(b: CfgBlock) -> PathBlock { return PathBlock.!(b); }
-def pe(e: CfgEdge) -> PathEdge { return PathEdge.!(e); }
+// every node in this monitor's graph is a PathBlock or PathEdge, so the casts below always succeed
 def newPathCfgBuilder() -> CfgBuilder {
 	def b = CfgBuilder.new();
 	b.newBlock = PathBlock.new;
@@ -132,41 +121,34 @@ def newPathCfgBuilder() -> CfgBuilder {
 	return b;
 }
 
-// Section 4 step 1: a dummy ENTRY->v per backedge target, a dummy w->EXIT per backedge source.
-// Step 2 is by exclusion, not deletion. (Section 4.1) a self-loop neither reinitializes {r} nor
-// increments a path counter, so its dummies would correspond to nothing -- the {source}/{target}
-// tests below exclude it.
+// Section 4 step 1, a dummy ENTRY->v per backedge target and a dummy w->EXIT per backedge source
 def addDummies(cb: CfgBuilder, entry: CfgBlock, exit: CfgBlock) {
-	// post-order: link below prepends to {b.outgoing}, which the dfs has finished walking by then.
-	// Each block is visited once and asks only about itself, so neither dummy needs deduplicating.
+	// post-order, since link prepends to {b.outgoing} after the dfs has walked it
 	entry.dfs(null, null, fun (b: CfgBlock) {
-		// target of a backedge
+		// target of a backedge, excluding a self-loop
 		for (l = b.incoming; l != null; l = l.tail) {
 			def e = l.head;
 			if (e.isBackedge && e.source != b && b != entry) {
-				def d = pe(cb.link(-1, entry, b));
+				def d = PathEdge.!(cb.link(-1, entry, b));
 				d.isDummy = true;
-				pb(b).entryDummy = d;
+				PathBlock.!(b).entryDummy = d;
 				break;
 			}
 		}
-		// source of a backedge
+		// source of a backedge, excluding a self-loop
 		for (l = b.outgoing; l != null; l = l.tail) {
 			def e = l.head;
 			if (e.isBackedge && e.target != b && b != exit) {
-				def d = pe(cb.link(-1, b, exit));
+				def d = PathEdge.!(cb.link(-1, b, exit));
 				d.isDummy = true;
-				pb(b).exitDummy = d;
+				PathBlock.!(b).exitDummy = d;
 				break;
 			}
 		}
 	});
 }
-// A block owning no instruction has nowhere to carry its outgoing edge's instrumentation, so
-// Fig. 8 cannot use it. It forwards unconditionally, so remove it: point each predecessor straight
-// at its single successor. One pass suffices for a chain of empty blocks either way round -- if the
-// predecessor is processed first it lands on the next block, which is then itself removed; if the
-// successor goes first, the predecessor lands directly past it.
+// Removes a block owning no instruction, which has nowhere to carry Fig. 8 instrumentation, by
+// pointing each predecessor straight at its single successor.
 def spliceEmptyBlocks(entry: CfgBlock, exit: CfgBlock) {
 	def blocks = Vector<CfgBlock>.new();
 	entry.dfs(blocks.put, null, null);
@@ -207,9 +189,8 @@ def spliceEmptyBlocks(entry: CfgBlock, exit: CfgBlock) {
 	}
 }
 // A function starting with `loop` leaves ENTRY owning no instruction, since that opcode belongs to
-// the loop header it merges into. Fig. 8 needs ENTRY to own one, and control enters ENTRY's single
-// successor unconditionally, so that successor is the real entry. Drops the edge between them,
-// which no longer has a source in the graph.
+// the loop header it merges into. Control enters ENTRY's single successor unconditionally, so that
+// successor is the real entry.
 def advanceEntry(entry: CfgBlock) -> CfgBlock {
 	var b = entry;
 	while (b.last_instr_pc < 0 && b.outgoing != null && b.outgoing.tail == null) {
@@ -223,25 +204,11 @@ def advanceEntry(entry: CfgBlock) -> CfgBlock {
 	}
 	return b;
 }
-def hasUnprofilableBranch(func: FuncDecl) -> bool {
-	def bi = BytecodeIterator.new().reset(func);
-	while (bi.more()) {
-		match (bi.current()) {
-			BR_ON_CAST, BR_ON_CAST_FAIL => return true;
-			_ => ;
-		}
-		bi.next();
-	}
-	return false;
-}
-// Control that leaves the function reaches no successor, so a block ending in `return` has no
-// outgoing edge. Ball-Larus needs it to reach EXIT, so link it here. A block ending in
-// `unreachable`/`throw` also has no successor, but it TRAPS -- it never reaches EXIT, and linking
-// it would record a trapped execution as a completed path.
+// Links each block ending in `return` to EXIT, which the CFG leaves without a successor. A block
+// ending in `unreachable` or `throw` traps instead, so it never reaches EXIT and gets no edge.
 def addReturnEdges(cb: CfgBuilder, func: FuncDecl, entry: CfgBlock, exit: CfgBlock) {
 	def bi = BytecodeIterator.new().reset(func);
-	// post-order, as addDummies: linking prepends to {b.outgoing}, and the dfs has finished
-	// walking it by then, so it never traverses an edge created during its own walk
+	// post-order, as addDummies
 	entry.dfs(null, null, fun (b: CfgBlock) {
 		if (b.outgoing != null || b == exit || b.last_instr_pc < 0) return;
 		bi.at(b.last_instr_pc, -1);
@@ -261,7 +228,7 @@ def assignVals(cfg: CfgBlock, exit: CfgBlock) {
 
 	// for each vertex v in reverse topological order
 	for (i < order.length) {
-		def v = pb(order[i]);
+		def v = PathBlock.!(order[i]);
 		// if v is a leaf vertex. Fig. 5's leaf is EXIT itself; a vertex that merely has no
 		// successors may be one that never reaches EXIT, whose paths never complete.
 		if (v == exit) {
@@ -272,7 +239,7 @@ def assignVals(cfg: CfgBlock, exit: CfgBlock) {
 			Lists.apply(v.outgoing, fun (c: CfgEdge) {
 				// skip backedges to convert CFG to DAG (Section 4)
 				if (c.isBackedge) return;
-				def e = pe(c), w = pb(c.target);
+				def e = PathEdge.!(c), w = PathBlock.!(c.target);
 				e.val = v.numPaths;
 				v.numPaths = v.numPaths + w.numPaths;
 			});
@@ -339,10 +306,8 @@ private class SpanningTree(tree: Array<PathEdge>, chords: Array<PathEdge>, backe
 	}
 }
 
-// Using a spanning tree to select edges to instrument and compute the appropriate increment
-// for each instrumented edge: Section 3.3
-// maximum spanning tree (Kruskal's algorithm, via disjoint set) - maximizing tree weight
-// minimizes the total weight of the chords left over to instrument
+// (Section 3.3) maximum spanning tree, by Kruskal's algorithm over a disjoint set. The chords left
+// over are the edges to instrument.
 def kruskals(entry: CfgBlock, exit: CfgBlock) -> SpanningTree {
 	// V
 	def vertices = Vector<CfgBlock>.new();
@@ -356,7 +321,7 @@ def kruskals(entry: CfgBlock, exit: CfgBlock) -> SpanningTree {
 			vertices.put(b);
 			// E
 			Lists.apply(b.outgoing, fun (c: CfgEdge) {
-				def e = pe(c);
+				def e = PathEdge.!(c);
 				// skip backedges to convert CFG to DAG (Section 4)
 				if (e.isBackedge) backedges.put(e);
 				else unsortedEdges.put(e);
@@ -393,9 +358,8 @@ def kruskals(entry: CfgBlock, exit: CfgBlock) -> SpanningTree {
 	// E - T
 	def chords = Vector<PathEdge>.new();
 
-	// Seed T with the EXIT->ENTRY edge (cf. "Optimally Profiling and Tracing Programs")
-	// to prevent it from being recorded as a chord in the spanning tree
-	// detached from both edge lists: it is not part of the CFG, only of the spanning tree
+	// Seed T with EXIT->ENTRY so it never becomes a chord. Detached from both edge lists, since it
+	// belongs to the spanning tree rather than the CFG.
 	def exitPathEdge = PathEdge.new(-1, exit, entry);
 	exitPathEdge.isChord = false;
 	exitPathEdge.index = tree.length;
@@ -450,7 +414,7 @@ def placeInit(entry: CfgBlock, st: SpanningTree) {
 	Vectors.drain(ws, 0, fun (v: CfgBlock) {
 		// for each edge e = v -> w
 		Lists.apply(v.outgoing, fun (c: CfgEdge) {
-			def e = pe(c);
+			def e = PathEdge.!(c);
 			// skip backedges to convert CFG to DAG (Section 4)
 			if (e.isBackedge || e.isDummy) return;
 			// if e is a chord edge
@@ -475,7 +439,7 @@ def placeCount(exit: CfgBlock, st: SpanningTree) {
 	Vectors.drain(ws, 0, fun (w: CfgBlock) {
 		// for each edge e = v -> w
 		Lists.apply(w.incoming, fun (c: CfgEdge) {
-			def e = pe(c);
+			def e = PathEdge.!(c);
 			// skip backedges to convert CFG to DAG (Section 4)
 			if (e.isBackedge || e.isDummy) return;
 			// if e is a chord edge
@@ -524,7 +488,7 @@ def placeBackedges(st: SpanningTree) {
 		}
 		// the loop bottom's ->EXIT dummy increments the counter, the loop head's ENTRY-> dummy
 		// reinitializes {r}; a dummy in the spanning tree has increment 0, as does an absent one
-		def ex = pb(te.source).exitDummy, en = pb(te.target).entryDummy;
+		def ex = PathBlock.!(te.source).exitDummy, en = PathBlock.!(te.target).entryDummy;
 		st.instrument(te, Action.CountReset(
 			if(ex == null, 0, ex.increment),
 			if(en == null, 0, en.increment)));
@@ -544,9 +508,8 @@ def execEdge(reg: RegState, te: PathEdge, counts: Array<int>) {
 		SelfLoop => te.selfLoopCount = te.selfLoopCount + 1;
 	}
 }
-// {r} is the running path register for one function; recursive re-entry pushes the caller's {r}
-// onto {stack} and pops it back on return, since {r} is shared per function rather than per call
-// activation.
+// The running path register {r} for one function, shared across activations, so recursion saves
+// and restores it on {stack}.
 private class RegState {
 	var r: int;
 	var active: bool;
@@ -567,20 +530,16 @@ private class RegState {
 	}
 }
 
-// place all real instrumentation for one function. Every block owns an instruction control cannot
-// reach without entering it ({last_instr_pc}), so each block's outgoing edge(s) are instrumented
-// right there — exactly where Fig. 8 says, with nothing folded elsewhere. Runs AFTER the Fig. 8
-// passes and placeBackedges, since it reads the {st.instrumented} set they populate.
+// Attaches the probes for one function, each at the {last_instr_pc} of the block whose edges it
+// instruments. Runs after the Fig. 8 passes and placeBackedges, whose Actions it reads.
 def placeProbes(m: Module, func: FuncDecl, entry: CfgBlock, exit: CfgBlock, st: SpanningTree, counts: Array<int>) {
 	def reg = RegState.new(); // register for `r`
 
 	// insert entry probes
 	Instrumentation.insertFuncEntryProbe(m, func.func_index, EntryProbe.new(reg));
 
-	// insert exit probes. The EXIT->ENTRY edge is seeded into T (see kruskals), so it is never a
-	// chord and has no Increment to apply here -- this probe only restores {r} for a recursive
-	// caller. Placed at every real return site plus the final byte, so exactly one fires per
-	// activation (a br out of the body lands on that final `end`).
+	// insert exit probes, at every return site plus the final byte, so exactly one fires per
+	// activation. Only restores {r}, since EXIT->ENTRY is never a chord.
 	def exitProbe = ExitProbe.new(reg);
 	def bi = BytecodeIterator.new().reset(func);
 	while (bi.more()) {
@@ -599,12 +558,12 @@ def placeProbes(m: Module, func: FuncDecl, entry: CfgBlock, exit: CfgBlock, st: 
 		def b = blocks[i];
 		// skip dummy edges on the outgoing edge set
 		var real = b.outgoing;
-		while (real != null && pe(real.head).isDummy) real = real.tail;
+		while (real != null && PathEdge.!(real.head).isDummy) real = real.tail;
 		def n = Lists.length(real);
 		if (n == 0) continue; // EXIT, or a block whose only edges are dummies
 		if (n == 1) {
 			// entering {b} already commits to its one edge; no operand to read
-			def te = pe(real.head);
+			def te = PathEdge.!(real.head);
 			Instrumentation.insertLocalProbe(m, func.func_index, b.last_instr_pc, EdgeProbe.new(reg, te, counts));
 			continue;
 		}
@@ -620,15 +579,27 @@ def placeProbes(m: Module, func: FuncDecl, entry: CfgBlock, exit: CfgBlock, st: 
 				def labels = bi.immptr().read_labels().length;
 				edges = Array<PathEdge>.new(labels);
 				var idx = labels - 1;
-				for (l = real; l != null; l = l.tail) edges[idx--] = pe(l.head);
+				for (l = real; l != null; l = l.tail) edges[idx--] = PathEdge.!(l.head);
 			}
 			// splitBlockInto creates the taken edge first and goto() prepends, so {real} is
 			// [fallthrough, taken] -- the order BranchProbe indexes by outcome
-			_ => edges = [pe(real.head), pe(real.tail.head)];
+			_ => edges = [PathEdge.!(real.head), PathEdge.!(real.tail.head)];
 		}
 		// one edge per label, so this is a bijection: every edge learns the arm that selects it
 		for (k < edges.length) edges[k].dispatchIndex = k;
-		Instrumentation.insertLocalProbe(m, func.func_index, b.last_instr_pc, BranchProbe.new(reg, op, edges, counts));
+		// the opcode picks the probe that knows how to read its outcome
+		var probe: BranchProbe;
+		match (op) {
+			BR_TABLE => probe = BrTableProbe.new(reg, edges, counts);
+			BR_ON_NULL => probe = BrOnNullProbe.new(reg, edges, counts, true);
+			BR_ON_NON_NULL => probe = BrOnNullProbe.new(reg, edges, counts, false);
+			BR_ON_CAST, BR_ON_CAST_FAIL => {
+				def imm = bi.immptr().read_BrOnCastImm();
+				probe = BrOnCastProbe.new(reg, edges, counts, imm.null2(), imm.ht2, op == Opcode.BR_ON_CAST);
+			}
+			_ => probe = BrIfProbe.new(reg, edges, counts);
+		}
+		Instrumentation.insertLocalProbe(m, func.func_index, b.last_instr_pc, probe);
 	}
 }
 private class EntryProbe(reg: RegState) extends Probe {
@@ -652,30 +623,59 @@ private class EdgeProbe(reg: RegState, te: PathEdge, counts: Array<int>) extends
 		return ProbeAction.Continue;
 	}
 }
-// a decision block: every branch that ends one picks its successor from the top of the operand
-// stack, so {op} says how to read that value. {edges} is indexed by outcome -- for a two-way branch
-// [fallthrough, taken], and for br_table the labels in order, the last being the default.
-private class BranchProbe(reg: RegState, op: Opcode, edges: Array<PathEdge>, counts: Array<int>) extends Probe {
+// Applies the instrumentation on whichever edge a branch takes. {edges} is indexed by outcome,
+// [fallthrough, taken] for a two-way branch and the labels in order for br_table, whose last entry
+// is the default. Each branch opcode has its own subclass supplying {select}, so the opcode is
+// resolved once when the probe is built rather than on every execution.
+private class BranchProbe(reg: RegState, edges: Array<PathEdge>, counts: Array<int>) extends Probe {
 	def fire(loc: DynamicLoc) -> ProbeAction {
-		def v = loc.frame.getFrameAccessor().getOperand(0);
-		var idx: int;
-		match (op) {
-			BR_TABLE => {
-				def u = Values.unbox_u(v);
-				idx = if(u >= u32.!(edges.length), edges.length - 1, int.!(u));
-			}
-			BR_ON_NULL => idx = if(Values.isNull(v), 1, 0);
-			BR_ON_NON_NULL => idx = if(Values.isNull(v), 0, 1);
-			_ => idx = if(Values.unbox_u(v) != 0, 1, 0); // br_if and the br_on_* that read an i32
-		}
-		execEdge(reg, edges[idx], counts);
+		def accessor = loc.frame.getFrameAccessor();
+		execEdge(reg, edges[select(accessor, accessor.getOperand(0))], counts);
 		return ProbeAction.Continue;
+	}
+	// the outcome {v} selects, as an index into {edges}
+	def select(accessor: FrameAccessor, v: Value) -> int;
+}
+// br_if, and the br_on_* that read an i32
+private class BrIfProbe extends BranchProbe {
+	new(reg: RegState, edges: Array<PathEdge>, counts: Array<int>) super(reg, edges, counts) { }
+	def select(accessor: FrameAccessor, v: Value) -> int {
+		return if(Values.unbox_u(v) != 0, 1, 0);
+	}
+}
+// an out-of-range index takes the default label, which is the last edge
+private class BrTableProbe extends BranchProbe {
+	new(reg: RegState, edges: Array<PathEdge>, counts: Array<int>) super(reg, edges, counts) { }
+	def select(accessor: FrameAccessor, v: Value) -> int {
+		def u = Values.unbox_u(v);
+		return if(u >= u32.!(edges.length), edges.length - 1, int.!(u));
+	}
+}
+// br_on_null when {nullTaken}, br_on_non_null otherwise
+private class BrOnNullProbe extends BranchProbe {
+	def nullTaken: bool;
+	new(reg: RegState, edges: Array<PathEdge>, counts: Array<int>, nullTaken) super(reg, edges, counts) { }
+	def select(accessor: FrameAccessor, v: Value) -> int {
+		return if(Values.isNull(v) == nullTaken, 1, 0);
+	}
+}
+// Repeats the subtype test the instruction itself performs, against the same operand. {nullable}
+// and {ht} are its type immediate; br_on_cast branches when the cast succeeds, br_on_cast_fail
+// when it fails, which is {successTaken}.
+private class BrOnCastProbe extends BranchProbe {
+	def nullable: bool;
+	def ht: int;
+	def successTaken: bool;
+	new(reg: RegState, edges: Array<PathEdge>, counts: Array<int>, nullable, ht, successTaken)
+		super(reg, edges, counts) { }
+	def select(accessor: FrameAccessor, v: Value) -> int {
+		def ok = Runtime.cast(accessor.func().instance, nullable, ht, v);
+		return if(ok == successTaken, 1, 0);
 	}
 }
 
-// Enumerate every ENTRY->EXIT path, indexed by its path number -- the sum of Val along it, which is
-// exactly the index the runtime increments. Returns null if the function has more paths than are
-// worth listing (the walk visits each path once, so its cost is the path count).
+// Enumerates every ENTRY->EXIT path, indexed by the sum of Val along it, which is the index the
+// runtime increments. Returns null for a function with more paths than are worth listing.
 def MAX_PATHS_TO_LIST = 1024;
 def enumPaths(entry: CfgBlock, exit: CfgBlock, numPaths: int) -> Array<List<int>> {
 	if (numPaths <= 0 || numPaths > MAX_PATHS_TO_LIST) return null;
@@ -693,7 +693,7 @@ def walkPath(v: CfgBlock, exit: CfgBlock, sum: int, acc: List<int>, out: Array<L
 		def e = l.head;
 		// skip backedges to convert CFG to DAG (Section 4)
 		if (e.isBackedge) continue;
-		walkPath(e.target, exit, sum + pe(e).val, here, out);
+		walkPath(e.target, exit, sum + PathEdge.!(e).val, here, out);
 	}
 }
 
@@ -712,7 +712,7 @@ def printCfgRec(out: TraceBuilder, b: CfgBlock, st: SpanningTree, touched: Vecto
 	// print all of this block's own edges first, so they aren't interleaved
 	// with a deeper block's edges once we recurse
 	Lists.apply(b.outgoing, fun (c: CfgEdge) {
-		def e = pe(c);
+		def e = PathEdge.!(c);
 		// Increment(e) is defined for chords only; a tree edge carries none
 		if (e.isChord) {
 			out.put3("    -> block %d val=%d inc=%d", e.target.id, e.val, e.increment);
