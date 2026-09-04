@@ -246,7 +246,7 @@ class X86_64Stack extends WasmStack {
 		}
 		// perform implicit popping for ctlxfer
 		var vfp = h.vfp();
-		var stack_top = handler.val_stack_top + func.decl.num_locals;
+		var stack_top = handler.val_stack_top + func.decl.num_slots();
 		var vsp = vfp + (stack_top * valuerep.slot_size);
 		this.vsp = vsp;
 		h.set_vsp(this.vsp);
