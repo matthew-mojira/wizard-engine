@@ -47,9 +47,15 @@ class PathProfilingMonitor extends Monitor {
 			def numPaths = PathBlock.!(cfg).numPaths;
 			placeBackedges(st);
 
+			// {r} lives in a frame variable, so each activation gets its own, zero-initialized by
+			// the engine at frame entry
+			def rvar = if(func.frame_var_tags != null, func.frame_var_tags.length);
+			def tag = [BpTypeCode.I32.code];
+			func.frame_var_tags = if(func.frame_var_tags == null, tag, Arrays.concat(func.frame_var_tags, tag));
+
 			// place probes, covering the edges each decision dispatches to
 			def counts: Array<int> = Array<int>.new(numPaths);
-			placeProbes(m, func, cfg, exit, st, counts);
+			placeProbes(m, func, rvar, st, counts);
 
 			entries.put(PathProfileEntry.new(m, func, cfg, exit, st, counts, numPaths));
 		}
@@ -495,63 +501,41 @@ def placeBackedges(st: SpanningTree) {
 	}
 }
 
+// {r} for the current activation, stored in the frame variable at {rvar}
+def getR(accessor: FrameAccessor, rvar: int) -> int {
+	return Values.unbox_i(accessor.getFrameVar(rvar));
+}
+def setR(accessor: FrameAccessor, rvar: int, v: int) {
+	accessor.getWriter().setFrameVar(rvar, Values.box_i(v));
+}
 // runs whatever Fig. 8 instrumented onto {te}, at the instruction that owns it
-def execEdge(reg: RegState, te: PathEdge, counts: Array<int>) {
+def execEdge(accessor: FrameAccessor, rvar: int, te: PathEdge, counts: Array<int>) {
 	match (te.action) {
 		Nothing => ;
-		RSet(value) => reg.r = value;
-		RAdd(value) => reg.r = reg.r + value;
-		CountR => counts[reg.r] = counts[reg.r] + 1;
-		CountConst(value) => counts[value] = counts[value] + 1;
-		CountRPlus(value) => counts[reg.r + value] = counts[reg.r + value] + 1;
-		CountReset(add, set) => { counts[reg.r + add] = counts[reg.r + add] + 1; reg.r = set; }
-		SelfLoop => te.selfLoopCount = te.selfLoopCount + 1;
-	}
-}
-// The running path register {r} for one function, shared across activations, so recursion saves
-// and restores it on {stack}.
-private class RegState {
-	var r: int;
-	var active: bool;
-	def stack = ArrayStack<int>.new();
-	// recursive re-entry: save the caller's {r} before resetting for this activation
-	def enter() {
-		if (active) stack.push(r);
-		r = 0;
-		active = true;
-	}
-	// restore the caller's {r}, or mark inactive if this was the outermost activation
-	def leave() {
-		if (!stack.empty()) {
-			r = stack.pop();
-		} else {
-			active = false;
+		RSet(value) => setR(accessor, rvar, value);
+		RAdd(value) => setR(accessor, rvar, getR(accessor, rvar) + value);
+		CountR => {
+			def r = getR(accessor, rvar);
+			counts[r] = counts[r] + 1;
 		}
+		CountConst(value) => counts[value] = counts[value] + 1;
+		CountRPlus(value) => {
+			def i = getR(accessor, rvar) + value;
+			counts[i] = counts[i] + 1;
+		}
+		CountReset(add, set) => {
+			def i = getR(accessor, rvar) + add;
+			counts[i] = counts[i] + 1;
+			setR(accessor, rvar, set);
+		}
+		SelfLoop => te.selfLoopCount = te.selfLoopCount + 1;
 	}
 }
 
 // Attaches the probes for one function, each at the {last_instr_pc} of the block whose edges it
 // instruments. Runs after the Fig. 8 passes and placeBackedges, whose Actions it reads.
-def placeProbes(m: Module, func: FuncDecl, entry: CfgBlock, exit: CfgBlock, st: SpanningTree, counts: Array<int>) {
-	def reg = RegState.new(); // register for `r`
-
-	// insert entry probes
-	Instrumentation.insertFuncEntryProbe(m, func.func_index, EntryProbe.new(reg));
-
-	// insert exit probes, at every return site plus the final byte, so exactly one fires per
-	// activation. Only restores {r}, since EXIT->ENTRY is never a chord.
-	def exitProbe = ExitProbe.new(reg);
+def placeProbes(m: Module, func: FuncDecl, rvar: int, st: SpanningTree, counts: Array<int>) {
 	def bi = BytecodeIterator.new().reset(func);
-	while (bi.more()) {
-		match (bi.current()) {
-			RETURN, RETURN_CALL, RETURN_CALL_INDIRECT, RETURN_CALL_REF =>
-				Instrumentation.insertLocalProbe(m, func.func_index, bi.pc, exitProbe);
-			_ => ;
-		}
-		bi.next();
-	}
-	Instrumentation.insertLocalProbe(m, func.func_index, func.cur_bytecode.length - 1, exitProbe);
-
 	// instrument blocks that were marked for instrumentation
 	def blocks = st.instrumented.toArray();
 	for (i < blocks.length) {
@@ -564,7 +548,7 @@ def placeProbes(m: Module, func: FuncDecl, entry: CfgBlock, exit: CfgBlock, st: 
 		if (n == 1) {
 			// entering {b} already commits to its one edge; no operand to read
 			def te = PathEdge.!(real.head);
-			Instrumentation.insertLocalProbe(m, func.func_index, b.last_instr_pc, EdgeProbe.new(reg, te, counts));
+			Instrumentation.insertLocalProbe(m, func.func_index, b.last_instr_pc, EdgeProbe.new(rvar, te, counts));
 			continue;
 		}
 		// a decision: {last_instr_pc} is the branch itself, and its opcode says how the probe reads
@@ -590,36 +574,22 @@ def placeProbes(m: Module, func: FuncDecl, entry: CfgBlock, exit: CfgBlock, st: 
 		// the opcode picks the probe that knows how to read its outcome
 		var probe: BranchProbe;
 		match (op) {
-			BR_TABLE => probe = BrTableProbe.new(reg, edges, counts);
-			BR_ON_NULL => probe = BrOnNullProbe.new(reg, edges, counts, true);
-			BR_ON_NON_NULL => probe = BrOnNullProbe.new(reg, edges, counts, false);
+			BR_TABLE => probe = BrTableProbe.new(rvar, edges, counts);
+			BR_ON_NULL => probe = BrOnNullProbe.new(rvar, edges, counts, true);
+			BR_ON_NON_NULL => probe = BrOnNullProbe.new(rvar, edges, counts, false);
 			BR_ON_CAST, BR_ON_CAST_FAIL => {
 				def imm = bi.immptr().read_BrOnCastImm();
-				probe = BrOnCastProbe.new(reg, edges, counts, imm.null2(), imm.ht2, op == Opcode.BR_ON_CAST);
+				probe = BrOnCastProbe.new(rvar, edges, counts, imm.null2(), imm.ht2, op == Opcode.BR_ON_CAST);
 			}
-			_ => probe = BrIfProbe.new(reg, edges, counts);
+			_ => probe = BrIfProbe.new(rvar, edges, counts);
 		}
 		Instrumentation.insertLocalProbe(m, func.func_index, b.last_instr_pc, probe);
 	}
 }
-private class EntryProbe(reg: RegState) extends Probe {
-	def fire(loc: DynamicLoc) -> ProbeAction {
-		reg.enter();
-		return ProbeAction.Continue;
-	}
-}
-// the EXIT vertex: restores {r} for a recursive caller. Carries no Fig. 8 instrumentation -- the
-// EXIT->ENTRY edge is seeded into the spanning tree, so it is never a chord.
-private class ExitProbe(reg: RegState) extends Probe {
-	def fire(loc: DynamicLoc) -> ProbeAction {
-		reg.leave();
-		return ProbeAction.Continue;
-	}
-}
 // a block whose single outgoing edge is taken whenever the block is entered
-private class EdgeProbe(reg: RegState, te: PathEdge, counts: Array<int>) extends Probe {
+private class EdgeProbe(rvar: int, te: PathEdge, counts: Array<int>) extends Probe {
 	def fire(loc: DynamicLoc) -> ProbeAction {
-		execEdge(reg, te, counts);
+		execEdge(loc.frame.getFrameAccessor(), rvar, te, counts);
 		return ProbeAction.Continue;
 	}
 }
@@ -627,10 +597,10 @@ private class EdgeProbe(reg: RegState, te: PathEdge, counts: Array<int>) extends
 // [fallthrough, taken] for a two-way branch and the labels in order for br_table, whose last entry
 // is the default. Each branch opcode has its own subclass supplying {select}, so the opcode is
 // resolved once when the probe is built rather than on every execution.
-private class BranchProbe(reg: RegState, edges: Array<PathEdge>, counts: Array<int>) extends Probe {
+private class BranchProbe(rvar: int, edges: Array<PathEdge>, counts: Array<int>) extends Probe {
 	def fire(loc: DynamicLoc) -> ProbeAction {
 		def accessor = loc.frame.getFrameAccessor();
-		execEdge(reg, edges[select(accessor, accessor.getOperand(0))], counts);
+		execEdge(accessor, rvar, edges[select(accessor, accessor.getOperand(0))], counts);
 		return ProbeAction.Continue;
 	}
 	// the outcome {v} selects, as an index into {edges}
@@ -638,14 +608,14 @@ private class BranchProbe(reg: RegState, edges: Array<PathEdge>, counts: Array<i
 }
 // br_if, and the br_on_* that read an i32
 private class BrIfProbe extends BranchProbe {
-	new(reg: RegState, edges: Array<PathEdge>, counts: Array<int>) super(reg, edges, counts) { }
+	new(rvar: int, edges: Array<PathEdge>, counts: Array<int>) super(rvar, edges, counts) { }
 	def select(accessor: FrameAccessor, v: Value) -> int {
 		return if(Values.unbox_u(v) != 0, 1, 0);
 	}
 }
 // an out-of-range index takes the default label, which is the last edge
 private class BrTableProbe extends BranchProbe {
-	new(reg: RegState, edges: Array<PathEdge>, counts: Array<int>) super(reg, edges, counts) { }
+	new(rvar: int, edges: Array<PathEdge>, counts: Array<int>) super(rvar, edges, counts) { }
 	def select(accessor: FrameAccessor, v: Value) -> int {
 		def u = Values.unbox_u(v);
 		return if(u >= u32.!(edges.length), edges.length - 1, int.!(u));
@@ -654,7 +624,7 @@ private class BrTableProbe extends BranchProbe {
 // br_on_null when {nullTaken}, br_on_non_null otherwise
 private class BrOnNullProbe extends BranchProbe {
 	def nullTaken: bool;
-	new(reg: RegState, edges: Array<PathEdge>, counts: Array<int>, nullTaken) super(reg, edges, counts) { }
+	new(rvar: int, edges: Array<PathEdge>, counts: Array<int>, nullTaken) super(rvar, edges, counts) { }
 	def select(accessor: FrameAccessor, v: Value) -> int {
 		return if(Values.isNull(v) == nullTaken, 1, 0);
 	}
@@ -666,8 +636,8 @@ private class BrOnCastProbe extends BranchProbe {
 	def nullable: bool;
 	def ht: int;
 	def successTaken: bool;
-	new(reg: RegState, edges: Array<PathEdge>, counts: Array<int>, nullable, ht, successTaken)
-		super(reg, edges, counts) { }
+	new(rvar: int, edges: Array<PathEdge>, counts: Array<int>, nullable, ht, successTaken)
+		super(rvar, edges, counts) { }
 	def select(accessor: FrameAccessor, v: Value) -> int {
 		def ok = Runtime.cast(accessor.func().instance, nullable, ht, v);
 		return if(ok == successTaken, 1, 0);
