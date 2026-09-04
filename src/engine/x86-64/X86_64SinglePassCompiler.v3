@@ -31,7 +31,7 @@ def pinned_IVars: Array<(int, Reg, X86_64Addr)> = [
 	(SpcConsts.IVAR_CURPC,     INT.curpc,     R.RSP.plus(X86_64InterpreterFrame.curpc.offset)),
 	(SpcConsts.IVAR_FUNC_DECL, INT.func_decl, R.RSP.plus(X86_64InterpreterFrame.func_decl.offset)),
 	(SpcConsts.IVAR_EIP,       INT.eip,       R.RSP.plus(X86_64InterpreterFrame.eip.offset)),
-	(SpcConsts.IVAR_DISPATCH,  INT.dispatch,  R.RSP.plus(X86_64InterpreterFrame.curpc.offset)) // address unused
+	(SpcConsts.IVAR_DISPATCH,  INT.dispatch,  null) // not stored in the frame
 ];
 def iVarFor(slot: int) -> (int, Reg, X86_64Addr) {
 	for (t in pinned_IVars) if (t.0 == slot) return t;
