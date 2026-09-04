@@ -22,6 +22,22 @@ def KIND_F32 = SpcConsts.KIND_F32;
 def KIND_F64 = SpcConsts.KIND_F64;
 def KIND_V128 = SpcConsts.KIND_V128;
 def KIND_REF = SpcConsts.KIND_REF;
+// Interpreter variables that compiled code reusing the interpreter's frame may overwrite,
+// as (slot, pinned register, home address in that frame).
+def INT = X86_64MasmRegs.INT_EXEC_ENV;
+def pinned_IVars: Array<(int, Reg, X86_64Addr)> = [
+	(SpcConsts.IVAR_IP,        INT.ip,        R.RSP.plus(X86_64InterpreterFrame.ip.offset)),
+	(SpcConsts.IVAR_STP,       INT.stp,       R.RSP.plus(X86_64InterpreterFrame.stp.offset)),
+	(SpcConsts.IVAR_CURPC,     INT.curpc,     R.RSP.plus(X86_64InterpreterFrame.curpc.offset)),
+	(SpcConsts.IVAR_FUNC_DECL, INT.func_decl, R.RSP.plus(X86_64InterpreterFrame.func_decl.offset)),
+	(SpcConsts.IVAR_EIP,       INT.eip,       R.RSP.plus(X86_64InterpreterFrame.eip.offset)),
+	(SpcConsts.IVAR_DISPATCH,  INT.dispatch,  R.RSP.plus(X86_64InterpreterFrame.curpc.offset)) // address unused
+];
+def iVarFor(slot: int) -> (int, Reg, X86_64Addr) {
+	for (t in pinned_IVars) if (t.0 == slot) return t;
+	System.error("IVarError", "not a pinned interpreter variable slot");
+	return pinned_IVars[0]; // unreachable
+}
 
 // Implements the target-specific parts of the single-pass compiler for X86-64.
 class X86_64SinglePassCompiler extends SinglePassCompiler {
@@ -32,6 +48,25 @@ class X86_64SinglePassCompiler extends SinglePassCompiler {
 	new(extensions: Extension.set, limits: Limits, config: RegConfig)
 		super(X86_64MasmRegs.SPC_EXEC_ENV, mmasm, X86_64MasmRegs.SPC_ALLOC.copy(), extensions, limits) {
 		mmasm.trap_stubs = TRAPS_STUB;
+	}
+	def pinIVars() {
+		for (t in pinned_IVars) regAlloc.assign(t.1, t.0);
+	}
+	// Writes {slot}'s value to its fixed interpreter-frame address.
+	def emitSpillIVar(slot: int) {
+		var t = iVarFor(slot);
+		asm.movq_m_r(t.2, G(t.1));
+	}
+	// Reloads {slot} into its pinned register and reassigns it, if not already held there.
+	def restoreIVar(slot: int) {
+		var t = iVarFor(slot);
+		if (regAlloc.hasAssignment(t.1, slot)) return;
+		spillAndAssign(t.1, slot);
+		if (slot == SpcConsts.IVAR_DISPATCH) {
+			if (!FeatureDisable.globalProbes) mmasm.emit_load_dispatch_table_reg(t.1);
+		} else {
+			asm.movq_r_m(G(t.1), t.2);
+		}
 	}
 
 	private def visitCompareI(asm: X86_64Assembler, cond: X86_64Cond) -> bool {

@@ -2181,6 +2181,12 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 		return label;
 	}
 	def getSpcInlinedFrameIp() -> long;
+	// Assigns each pinned register to its reserved slot in the register allocator.
+	def pinIVars();
+	// Writes {slot}'s pinned register out to its fixed home address.
+	def emitSpillIVar(slot: int);
+	// Reloads {slot}'s value into its pinned register and reassigns it, if not already held.
+	def restoreIVar(slot: int);
 	// Emit code to materialize stack frames for each inlined function.
 	def emitReconstructStackFrames(frames: Array<SpcFrame>) -> int {
 		Metrics.spc_static_reconst.val++;
@@ -2521,9 +2527,13 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 		return reg;
 	}
 	def allocFixed(kind: ValueKind, reg: Reg, slot: u32) -> Reg {
-		if (!regAlloc.isFree(reg)) spillRegAndFree(reg);
-		regAlloc.assign(reg, int.!(slot));
+		spillAndAssign(reg, int.!(slot));
 		return reg;
+	}
+	// Spills whatever {reg} currently holds (if anything) and assigns it to {slot}.
+	def spillAndAssign(reg: Reg, slot: int) {
+		if (!regAlloc.isFree(reg)) spillRegAndFree(reg);
+		regAlloc.assign(reg, slot);
 	}
 	def ensureReg(sv: SpcVal, slot: u32) -> Reg {
 		var reg = sv.reg;

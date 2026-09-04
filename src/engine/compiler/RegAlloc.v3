@@ -15,6 +15,7 @@ class RegAlloc {
 	private var freebits: Array<int>;		// free status for each register, by pool
 	private var first: Array<int>;			// first assignment of each register
 	private var aliases: Array<List<int>>;		// overflow list of each register
+	var pinned: bool;				// registers holding interpreter state are pinned
 
 	new(poolMap, pools, prev: RegAlloc) {
 		if (prev == null) {
@@ -143,12 +144,13 @@ class RegAlloc {
 	}
 	// Removes all assignments except for pinned registers that hold their pinned assignment.
 	def clearExceptPinned() -> this {
-		var pinned = X86_64MasmRegs.PINNED_IVAR_REGS;
-		var savedFirst = Array<int>.new(pinned.length);
-		var savedAliases = Array<List<int>>.new(pinned.length);
-		for (n < pinned.length) {
-			var reg = pinned[n], slot = SpcConsts.IVAR_SLOT_MIN + n;
-			if (hasAssignment(reg, slot)) {
+		if (!pinned) { clear(); return; }
+		var regs = X86_64MasmRegs.PINNED_IVARS;
+		var savedFirst = Array<int>.new(regs.length);
+		var savedAliases = Array<List<int>>.new(regs.length);
+		for (n < regs.length) {
+			var reg = regs[n].0, assignment = regs[n].1;
+			if (hasAssignment(reg, assignment)) {
 				savedFirst[n] = first[reg.index];
 				savedAliases[n] = aliases[reg.index];
 			} else {
@@ -156,18 +158,30 @@ class RegAlloc {
 			}
 		}
 		clear();
-		for (n < pinned.length) {
+		for (n < regs.length) {
 			if (savedFirst[n] < 0) continue;
-			var reg = pinned[n];
+			var reg = regs[n].0;
 			first[reg.index] = savedFirst[n];
 			aliases[reg.index] = savedAliases[n];
 			var p = regToPool[reg.index];
 			freebits[p] &= ~(1 << pools[p].map[reg.index]);
 		}
 	}
+	// Frees every pinned register that currently holds its pinned assignment. Used before
+	// code that clobbers those registers (a call, or a raw move into one at a merge point).
+	def freePinned() -> this {
+		if (!pinned) return;
+		var regs = X86_64MasmRegs.PINNED_IVARS;
+		for (n < regs.length) {
+			var reg = regs[n].0, assignment = regs[n].1;
+			if (hasAssignment(reg, assignment)) free(reg);
+		}
+	}
 	// Make a copy of this register allocator, including all of its current assignments.
 	def copy() -> RegAlloc {
-		return RegAlloc.new(poolMap, pools, this);
+		var n = RegAlloc.new(poolMap, pools, this);
+		n.pinned = pinned;
+		return n;
 	}
 	// Finds the allocated register of {kind} with the lowest score. The {addSpillCost}
 	// function takes {(score, reg, assign)} and should add the additional spill cost
