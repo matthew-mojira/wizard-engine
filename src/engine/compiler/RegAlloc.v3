@@ -143,38 +143,26 @@ class RegAlloc {
 		for (i < aliases.length) aliases[i] = null;
 	}
 	// Removes all assignments except for pinned registers that hold their pinned assignment.
+	// Re-marking after {clear()} preserves the full state, since a register holding
+	// {IVAR_SLOT} holds nothing else (see the invariant on {SpcConsts.IVAR_SLOT}).
 	def clearExceptPinned() -> this {
 		if (!pinned) { clear(); return; }
 		var regs = X86_64MasmRegs.PINNED_IVARS;
-		var savedFirst = Array<int>.new(regs.length);
-		var savedAliases = Array<List<int>>.new(regs.length);
+		var held = 0;
 		for (n < regs.length) {
-			var reg = regs[n].0, assignment = regs[n].1;
-			if (hasAssignment(reg, assignment)) {
-				savedFirst[n] = first[reg.index];
-				savedAliases[n] = aliases[reg.index];
-			} else {
-				savedFirst[n] = -1; // no longer pinned; nothing to preserve
-			}
+			if (hasAssignment(regs[n], SpcConsts.IVAR_SLOT)) held |= 1 << u5.view(n);
 		}
 		clear();
 		for (n < regs.length) {
-			if (savedFirst[n] < 0) continue;
-			var reg = regs[n].0;
-			first[reg.index] = savedFirst[n];
-			aliases[reg.index] = savedAliases[n];
-			var p = regToPool[reg.index];
-			freebits[p] &= ~(1 << pools[p].map[reg.index]);
+			if ((held & (1 << u5.view(n))) != 0) assign(regs[n], SpcConsts.IVAR_SLOT);
 		}
 	}
 	// Frees every pinned register that currently holds its pinned assignment. Used before
 	// code that clobbers those registers (a call, or a raw move into one at a merge point).
 	def freePinned() -> this {
 		if (!pinned) return;
-		var regs = X86_64MasmRegs.PINNED_IVARS;
-		for (n < regs.length) {
-			var reg = regs[n].0, assignment = regs[n].1;
-			if (hasAssignment(reg, assignment)) free(reg);
+		for (reg in X86_64MasmRegs.PINNED_IVARS) {
+			if (hasAssignment(reg, SpcConsts.IVAR_SLOT)) free(reg);
 		}
 	}
 	// Make a copy of this register allocator, including all of its current assignments.
