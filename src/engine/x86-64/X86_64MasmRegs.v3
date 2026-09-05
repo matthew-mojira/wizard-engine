@@ -168,16 +168,9 @@ component X86_64MasmRegs {
 	// The execution environment for interpreter compilation contexts.
 	def INT_EXEC_ENV = t.1;
 	// The registers holding interpreter state that compiled code reusing the interpreter's
-	// frame may borrow, provided it spills and restores them, each paired with the
-	// {RegAlloc} assignment it is pinned to.
-	def PINNED_IVARS: Array<(Reg, int)> = [
-		(INT_EXEC_ENV.ip,		SpcConsts.IVAR_IP),
-		(INT_EXEC_ENV.stp,		SpcConsts.IVAR_STP),
-		(INT_EXEC_ENV.curpc,		SpcConsts.IVAR_CURPC),
-		(INT_EXEC_ENV.func_decl,	SpcConsts.IVAR_FUNC_DECL),
-		(INT_EXEC_ENV.eip,		SpcConsts.IVAR_EIP),
-		(INT_EXEC_ENV.dispatch,		SpcConsts.IVAR_DISPATCH)
-	];
+	// frame may borrow, provided it saves and restores them.
+	def PINNED_IVARS: Array<Reg> = [INT_EXEC_ENV.ip, INT_EXEC_ENV.stp, INT_EXEC_ENV.curpc,
+		INT_EXEC_ENV.func_decl, INT_EXEC_ENV.eip, INT_EXEC_ENV.dispatch];
 
 	// A register allocator for single-pass compilation contexts. No pinned registers.
 	def SPC_ALLOC = (fun -> RegAlloc {

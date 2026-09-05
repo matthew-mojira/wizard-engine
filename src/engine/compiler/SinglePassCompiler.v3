@@ -61,15 +61,13 @@ component SpcConsts {
 		return byte.view(kind.tag) << 4;
 	}
 
-	// Sentinel {RegAlloc} assignments for the fast interpreter's IVar registers.
-	def IVAR_IP = TMP_SLOT + 1;
-	def IVAR_STP = TMP_SLOT + 2;
-	def IVAR_CURPC = TMP_SLOT + 3;
-	def IVAR_FUNC_DECL = TMP_SLOT + 4;
-	def IVAR_EIP = TMP_SLOT + 5;
-	def IVAR_DISPATCH = TMP_SLOT + 6;
-	def IVAR_SLOT_MIN = IVAR_IP;
-	def IVAR_SLOT_MAX = IVAR_DISPATCH;
+	// Sentinel {RegAlloc} assignment marking a register that holds its interpreter
+	// variable. Which variable is identified by the register itself.
+	// Invariant: a register holding {IVAR_SLOT} holds nothing else. It gets this
+	// assignment only while free, and anyone who wants such a register for another
+	// purpose must free it first (saving the variable to its home as needed) rather
+	// than assign on top of it.
+	def IVAR_SLOT = 2000000000;
 }
 
 // Shorten constants inside this file.
@@ -87,14 +85,7 @@ def KIND_V128 = SpcConsts.KIND_V128;
 def KIND_REF = SpcConsts.KIND_REF;
 def KIND_REF_U64 = SpcConsts.KIND_REF_U64;
 def KIND_CONT = SpcConsts.KIND_CONT;
-def IVAR_IP = SpcConsts.IVAR_IP;
-def IVAR_STP = SpcConsts.IVAR_STP;
-def IVAR_CURPC = SpcConsts.IVAR_CURPC;
-def IVAR_FUNC_DECL = SpcConsts.IVAR_FUNC_DECL;
-def IVAR_EIP = SpcConsts.IVAR_EIP;
-def IVAR_DISPATCH = SpcConsts.IVAR_DISPATCH;
-def IVAR_SLOT_MIN = SpcConsts.IVAR_SLOT_MIN;
-def IVAR_SLOT_MAX = SpcConsts.IVAR_SLOT_MAX;
+def IVAR_SLOT = SpcConsts.IVAR_SLOT;
 
 // Compiles Wasm bytecode to machine code in a single pass via a MacroAssembler.
 class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAlloc, extensions: Extension.set, limits: Limits) extends BytecodeVisitor {
@@ -2181,12 +2172,12 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 		return label;
 	}
 	def getSpcInlinedFrameIp() -> long;
-	// Assigns each pinned register to its reserved slot in the register allocator.
+	// Marks each pinned register as holding its interpreter variable ({IVAR_SLOT}).
 	def pinIVars();
-	// Writes {slot}'s pinned register out to its fixed home address.
-	def emitSpillIVar(slot: int);
-	// Reloads {slot}'s value into its pinned register and reassigns it, if not already held.
-	def restoreIVar(slot: int);
+	// Writes the interpreter variable in {reg} out to its home in the interpreter frame.
+	def emitSaveIVar(reg: Reg);
+	// Reloads {reg}'s interpreter variable and re-marks it, if not already held.
+	def restoreIVar(reg: Reg);
 	// Emit code to materialize stack frames for each inlined function.
 	def emitReconstructStackFrames(frames: Array<SpcFrame>) -> int {
 		Metrics.spc_static_reconst.val++;
@@ -2527,13 +2518,9 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 		return reg;
 	}
 	def allocFixed(kind: ValueKind, reg: Reg, slot: u32) -> Reg {
-		spillAndAssign(reg, int.!(slot));
-		return reg;
-	}
-	// Spills whatever {reg} currently holds (if anything) and assigns it to {slot}.
-	def spillAndAssign(reg: Reg, slot: int) {
 		if (!regAlloc.isFree(reg)) spillRegAndFree(reg);
-		regAlloc.assign(reg, slot);
+		regAlloc.assign(reg, int.!(slot));
+		return reg;
 	}
 	def ensureReg(sv: SpcVal, slot: u32) -> Reg {
 		var reg = sv.reg;
@@ -2569,7 +2556,7 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 		return regAlloc.alloc(kind, slot);
 	}
 	def addSpillCost(score: int, reg: Reg, slot: int) -> int {
-		if (slot >= IVAR_SLOT_MIN && slot <= IVAR_SLOT_MAX) return 50 + score; // IVar reg
+		if (slot == IVAR_SLOT) return 50 + score; // IVar reg
 		if (slot >= state.sp) return 100000000 + score;       // tmp slot?
 		if (!state.state[slot].isStored()) score += 100;      // will generate a spill
 		if (slot < 10 && slot < func.num_locals) score += 10; // penalize first 10 locals
@@ -2697,7 +2684,7 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 	def emitSpill(slot: int) {
 		if (slot == TMP_SLOT) return;
 		// IVars are either spilled in prologue or correct from the interpreter context, and don't need to be spilled again.
-		if (slot >= IVAR_SLOT_MIN && slot <= IVAR_SLOT_MAX) return;
+		if (slot == IVAR_SLOT) return;
 		var sv = state.state[slot];
 		if (sv.isConst()) return void(state.state[slot] = sv.withoutReg());
 		if (sv.isStored()) return void(state.state[slot] = sv.withoutReg());
