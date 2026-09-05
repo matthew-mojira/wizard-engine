@@ -76,6 +76,8 @@ class RegAlloc {
 	// Add an {assignment} to the register {reg}.
 	def assign(reg: Reg, assignment: int) {
 		if (first[reg.index] >= 0) {
+			// see the invariant on {SpcConsts.IVAR_SLOT}: free such a register first
+			if (first[reg.index] == SpcConsts.IVAR_SLOT) System.error("RegAllocError", "assign to a register holding its interpreter variable");
 			// already assigned; add an alias
 			aliases[reg.index] = List.new(assignment, aliases[reg.index]);
 			return;
