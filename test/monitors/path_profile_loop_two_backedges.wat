@@ -2,10 +2,11 @@
 ;; single backedge taken repeatedly; here the segment that ends at a backedge can end at either of
 ;; two different edges, so type 3 is split across them and each must be told apart.
 ;;
-;; Section 4 step 1 adds dummies per backedge, not per header, so $top gets TWO incoming ENTRY->$top
-;; dummy edges and the two branch sources each get their own ->EXIT dummy. That is the case this
-;; pins: the transform must not collapse them into one, or the two backedges become indistinguishable
-;; and their counts merge into a single bucket.
+;; Section 4 step 1 adds dummies per VERTEX, not per backedge -- "for each vertex v that is the
+;; target of one or more backedges, add a dummy edge ENTRY -> v" -- so $top gets ONE incoming
+;; ENTRY->$top dummy however many backedges arrive, while the two branch sources, being distinct
+;; vertices, each get their own ->EXIT dummy. That asymmetry is what this pins: the two backedges
+;; must still be told apart even though they share a reinitialization constant.
 ;;
 ;; $two increments $i each iteration and takes backedge A when $i is even, backedge B when it is odd.
 ;;   n=0 -> the guard fails immediately: type 1 alone, no backedge.

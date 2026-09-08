@@ -1,0 +1,41 @@
+func #0
+  block 102 +1 ... 14
+    -> block 103 val=0 inc=0
+    -> block 102 val=0 BACKEDGE
+  block 103 +14 ... 17
+    -> block 101 val=0
+  block 101 +17 ... 18
+  counts[0] = 1
+      path: 102 103 101
+  selfloop[block 102 +12 arm 1] = 2
+func #1
+  block 106 +1 ... 17
+    -> block 107 val=0
+    -> block 108 val=2
+  block 107 +18 ... 23
+    -> block 105 val=0 inc=0 DUMMY
+    -> block 109 val=1
+    -> block 106 val=0 BACKEDGE
+  block 105 +26 ... 27
+  block 109 +23 ... 26
+    -> block 105 val=0 inc=1
+  block 108 +17 ... 18
+    -> block 107 val=0 inc=2
+  counts[0] = 1
+      path: 106 107 105
+  counts[1] = 1
+      path: 106 107 109 105
+  counts[2] = 1
+      path: 106 108 107 105
+  counts[3] = 0
+      path: 106 108 107 109 105
+func #2
+  block 112 +1 ... 5
+    -> block 112 val=0 BACKEDGE
+  selfloop[block 112 +3 arm 0] = 0
+func #3
+  block 113 +1 ... 11
+    -> block 114 val=0 inc=0
+  block 114 +11 ... 12
+  counts[0] = 1
+      path: 113 114

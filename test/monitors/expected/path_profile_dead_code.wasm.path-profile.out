@@ -1,0 +1,28 @@
+func #0
+  block 100 +3 ... 11
+    -> block 102 val=0 inc=0
+  block 102 +16 ... 19
+    -> block 101 val=0
+  block 101 +19 ... 20
+  counts[0] = 3
+      path: 100 102 101
+func #1
+  block 103 +1 ... 2
+func #2
+  block 105 +1 ... 5
+    -> block 109 val=0
+    -> block 108 val=0
+  block 109 +7 ... 8
+  block 108 +5 ... 7
+    -> block 107 val=0 inc=0
+  block 107 +8 ... 11
+    -> block 106 val=0
+  block 106 +11 ... 12
+  counts[0] = 2
+      path: 105 108 107 106
+func #3
+  block 110 +1 ... 20
+    -> block 111 val=0 inc=0
+  block 111 +20 ... 21
+  counts[0] = 1
+      path: 110 111

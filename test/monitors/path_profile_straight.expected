@@ -1,8 +1,0 @@
-func #0
-  counts[0] = 5
-func #1
-  counts[0] = 4
-func #2
-  counts[0] = 2
-func #3
-  counts[0] = 1
