@@ -2180,8 +2180,8 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 		return label;
 	}
 	def getSpcInlinedFrameIp() -> long;
-	// Marks each pinned register as holding its interpreter variable ({IVAR_SLOT}).
-	def pinIVars();
+	// Marks each borrowable register as holding its interpreter variable ({IVAR_SLOT}).
+	def markIVars();
 	// Writes the interpreter variable in {reg} out to its home in the interpreter frame.
 	def emitSaveIVar(reg: Reg);
 	// Reloads {reg}'s interpreter variable and re-marks it, if not already held.
@@ -2692,6 +2692,7 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 	def emitSpill(slot: int) {
 		if (slot == TMP_SLOT) return;
 		// IVars are either spilled in prologue or correct from the interpreter context, and don't need to be spilled again.
+		// TODO: spill a save-required IVar here automatically, so reusing one need not be saved eagerly.
 		if (slot == IVAR_SLOT) return;
 		var sv = state.state[slot];
 		if (sv.isConst()) return void(state.state[slot] = sv.withoutReg());

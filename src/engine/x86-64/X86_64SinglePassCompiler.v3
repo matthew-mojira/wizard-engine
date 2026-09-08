@@ -35,8 +35,8 @@ class X86_64SinglePassCompiler extends SinglePassCompiler {
 		super(X86_64MasmRegs.SPC_EXEC_ENV, mmasm, X86_64MasmRegs.SPC_ALLOC.copy(), extensions, limits) {
 		mmasm.trap_stubs = TRAPS_STUB;
 	}
-	def pinIVars() {
-		for (reg in X86_64MasmRegs.PINNED_IVARS) regAlloc.assign(reg, IVAR_SLOT);
+	def markIVars() {
+		for (reg in X86_64MasmRegs.BORROWABLE_IVARS) regAlloc.assign(reg, IVAR_SLOT);
 	}
 	// Writes the interpreter variable in {reg} out to its home in the interpreter frame.
 	// Must not be called for the dispatch register, which has no frame home.
