@@ -79,7 +79,7 @@ class PathProfilingMonitor extends Monitor {
 			// naming the branch arm that reaches it.
 			for (te in e.st.backedges) {
 				if (te.source != te.target) continue;
-				out.put2("  selfloop[block %d pc=%d", te.source.id, te.source.last_instr_pc);
+				out.put2("  selfloop[block %d +%d", te.source.id, te.source.last_instr_pc);
 				out.put2(" arm %d] = %d", te.dispatchIndex, te.selfLoopCount).ln();
 			}
 		}
@@ -677,8 +677,8 @@ def printCfgRec(out: TraceBuilder, b: CfgBlock, st: SpanningTree, touched: Vecto
 	if (b == null || b.mark != 0) return;
 	b.mark = 1;
 	touched.put(b);
-	// {last_instr_pc} is the instruction this block owns -- where its outgoing edges are probed
-	out.put2("  block %d pc=%d", b.id, b.last_instr_pc).ln();
+	// the range of bytes this block owns; its outgoing edges are probed at {last_instr_pc}
+	out.put3("  block %d +%d ... %d", b.id, b.start, b.end).ln();
 	// print all of this block's own edges first, so they aren't interleaved
 	// with a deeper block's edges once we recurse
 	Lists.apply(b.outgoing, fun (c: CfgEdge) {
