@@ -22,16 +22,18 @@ cd $HERE
 if [ $# -gt 0  ]; then
     MONITORS=($@)
 else
-    MONITORS=("loops" "loops{c}" 
-        "coverage" "coverage{c}" "coverage{i}" 
-        "calls" 
-        "branches" "branches{c}" 
+    MONITORS=("loops" "loops{c}"
+        "coverage" "coverage{c}" "coverage{i}"
+        "calls"
+        "branches" "branches{c}"
         "hotness" "hotness{c}"
-        "globals" 
+        "globals"
         "profile_bytecode{switch_size=16}"
         "profile_bytecode{switch_size=7,abstract_interpreter=false}"
         "profile_bytecode{switch_size=7,abstract_interpreter=true}"
-	      "alloc")
+        "alloc"
+        "opcodes"
+        "ssevent")
 fi
 
 TESTS=$(ls *.wasm)
@@ -68,11 +70,13 @@ function run_test {
             diff expected/$test.$suffix.out $P.out | tee $P.out.diff
             DIFF=${PIPESTATUS[0]}
             if [ "$DIFF" != 0  ]; then
-                if [ -f failures.$target  ]; then
-                    grep $test failures.$target
-                    if [ $? = 0  ]; then
-                        continue # test was found in expected failures
-                    fi
+                if [ -f failures.$target ] && grep -q "$test *$monitor" failures.$target; then
+                    echo "##-ok" # expected failure (target-wide)
+                    continue
+                fi
+                if [ -f failures.$target.$TEST_MODE ] && grep -q "$test *$monitor" failures.$target.$TEST_MODE; then
+                    echo "##-ok" # expected failure (mode-specific)
+                    continue
                 fi
                 echo "##-fail: $P.out.diff"
                 return 1

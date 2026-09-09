@@ -161,6 +161,12 @@ component Target {
 		}
 		return RedZones.addRedZone(mapping, offset, size);
 	}
+
+	// TODO[sc]: empty function stubs for stack compression (real impl lands with the x86-64 backend).
+	// Stack compression: read the frames of a stack into an array of target independent frames representation.
+	def readFramesFromStack(from: WasmStack) -> Array<RelocatableFrame>;
+	// Stack compression: overwrite the destination stack with the content of the relocatable frames.
+	def writeFramesToStack(dest: WasmStack, frames: Array<RelocatableFrame>);
 }
 
 type TargetOsrInfo(spc_entry: Pointer, osr_entries: List<(int, int)>) #unboxed { }
@@ -171,6 +177,10 @@ type TargetFrame(sfp: Pointer) #unboxed {
 	def srp() -> Pointer { return sfp + -Pointer.SIZE; }
 	def getFrameAccessor() -> X86_64FrameAccessor {
 		return X86_64Stacks.getFrameAccessor(sfp);
+	}
+	// TODO[cleanup]: a frame accessor should be able to obtain its corresponding stack
+	def getFrameAccessorOfStack(stack: X86_64Stack) -> X86_64FrameAccessor {
+		return X86_64Stacks.getFrameAccessorOfStack(sfp, stack);
 	}
 }
 type SpcResultForStub(wf: WasmFunction, entrypoint: Pointer, thrown: Throwable) #unboxed { }
@@ -242,6 +252,12 @@ class X86_64SpcStrategy extends X86_64ExecutionStrategy {
 		if (!applyJitFilter(wf.instance.module, wf.decl, how)) return SpcResultForStub(wf, X86_64Spc.setInterpreterFallback(wf.decl), null);
 
 		var module = wf.instance.module;
+		// A module that was never prepared for this target has no code region yet. This
+		// happens for the inner module of an environment, whose functions are created at
+		// runtime by {func.new}; allocate a region for it on demand.
+		if (module.target_module.spc_code == null) {
+			allocateCodeForModule(module, MINIMUM_CODE_SIZE + X86_64Spc.estimateCodeSizeFor(wf.decl));
+		}
 		var code = module.target_module.spc_code;
 		var compiler = newCompiler(module.filename); // XXX: cache per-thread
 		var masm = X86_64MacroAssembler.!(compiler.masm), w = masm.asm.w;

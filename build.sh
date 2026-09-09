@@ -43,7 +43,7 @@ if [ ! -e "$VIRGIL_LIB/util/Vector.v3" ]; then
     exit 1
 fi
 
-ENGINE="src/engine/*.v3 src/util/*.v3 $VIRGIL_LIB/util/*.v3"
+ENGINE="src/engine/*.v3 src/engine/compression/*.v3 src/util/*.v3 $VIRGIL_LIB/util/*.v3"
 MONITORS="src/monitors/*.v3"
 TEST_MONITORS="src/monitors/test/*.v3"
 DEBUG_MONITORS="src/monitors/debug/*.v3"
@@ -174,6 +174,8 @@ if [[ "$TARGET" = "x86-linux" || "$TARGET" = "x86_linux" ]]; then
     exec v3c-x86-linux -symbols -heap-size=512m -stack-size=1m $LANG_OPTS $V3C_OPTS -program-name=${PROGRAM}.x86-linux -output=bin/ $SOURCES $BUILD_FILE $TARGET_SRC
 elif [[ "$TARGET" = "x86-64-darwin" || "$TARGET" = "x86_64_darwin" ]]; then
     exec v3c-x86-64-darwin -symbols -heap-size=700m -stack-size=1m $LANG_OPTS $V3C_OPTS -program-name=${PROGRAM}.x86-64-darwin -output=bin/ $SOURCES $BUILD_FILE $TARGET_V3
+elif [[ "$TARGET" = "arm64-linux" || "$TARGET" = "arm64_linux" ]]; then
+    exec v3c-arm64-linux -symbols -heap-size=700m -stack-size=1m $LANG_OPTS $V3C_OPTS -program-name=${PROGRAM}.arm64-linux -output=bin/ $SOURCES $BUILD_FILE $TARGET_V3
 elif [[ "$TARGET" = "x86-64-linux" || "$TARGET" = "x86_64_linux" ]]; then
     TARGET_SRC=$TARGET_X86_64
     if "$CBD"; then TARGET_SRC="$TARGET_CBD_FAST $TARGET_X86_64"; fi

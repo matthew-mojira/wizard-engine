@@ -18,14 +18,15 @@ CMD="$WIZENG_LOC/$BINARY --colors=false"
 if [ $# -gt 0 ]; then
     MONITORS=($@)
 else
-    MONITORS=("loops" "loops{c}" 
-        "coverage" "coverage{c}" "coverage{i}" 
-        "calls" "calls{c}" 
-        "branches" "branches{c}" 
+    MONITORS=("loops" "loops{c}"
+        "coverage" "coverage{c}" "coverage{i}"
+        "calls" "calls{c}"
+        "branches" "branches{c}"
         "hotness" "hotness{c}"
-        "globals" 
+        "globals"
         "memstats"
-	"profile_bytecode{switch_size=16}")
+	    "profile_bytecode{switch_size=16}"
+	    "ssevent")
 fi
 
 # generate output files from all .wasm in a folder

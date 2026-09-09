@@ -187,7 +187,6 @@ class CodePtr extends DataReader {
 		for (imm in imms) {
 			match (imm) {
 				ARRAY_TYPE_INDEX,
-				BLOCK_TYPE,
 				DATA_INDEX,
 				ELEM_INDEX,
 				TAG_INDEX,
@@ -204,7 +203,9 @@ class CodePtr extends DataReader {
 				U32,
 				I32,
 				I64,
-				CONT_INDEX => skip_leb();
+				CONT_INDEX,
+				ENV_INDEX => skip_leb();
+				BLOCK_TYPE => skip_block_type();
 				VALUE_TYPES => skip_value_types();
 				LABELS => {
 					var count = read_uleb32();
