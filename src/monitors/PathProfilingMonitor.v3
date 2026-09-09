@@ -19,7 +19,7 @@ class PathProfilingMonitor extends Monitor {
 			// every path must end at EXIT, so route all `return`s to EXIT
 			addReturnEdges(cfgBuilder, func, cfgExit.0, exit);
 			// remove empty blocks so that remaining blocks have an instruction to increment
-			spliceEmptyBlocks(cfgExit.0, exit);
+			cfgBuilder.spliceEmptyBlocks(cfgExit.0, exit);
 			def cfg = advanceEntry(cfgExit.0);
 
 			// (Section 4) general CFG to DAG, by dummy edges around each backedge
@@ -152,47 +152,6 @@ def addDummies(cb: CfgBuilder, entry: CfgBlock, exit: CfgBlock) {
 			}
 		}
 	});
-}
-// Removes a block owning no instruction, which has nowhere to carry Fig. 8 instrumentation, by
-// pointing each predecessor straight at its single successor.
-def spliceEmptyBlocks(entry: CfgBlock, exit: CfgBlock) {
-	def blocks = Vector<CfgBlock>.new();
-	entry.dfs(blocks.put, null, null);
-	for (i < blocks.length) {
-		def b = blocks[i];
-		if (b == entry || b == exit || b.last_instr_pc >= 0) continue;
-		if (b.incoming == null || b.outgoing == null || b.outgoing.tail != null) continue;
-		def out = b.outgoing.head, to = out.target;
-		for (l = b.incoming; l != null; l = l.tail) {
-			def e = l.head, p = e.source;
-			// {outgoing} order is the branch's label order, which probes rely on, so splice {e}
-			// out in place: only the cells ahead of it are copied, the rest of the list is shared
-			var head = p.outgoing, pre: List<CfgEdge>;
-			while (head.head != e) {
-				pre = List.new(head.head, pre);
-				head = head.tail;
-			}
-			def n = PathEdge.new(e.pc, p, to);
-			// {b} forwards unconditionally, so the edge replacing {e} inherits {b}->{to} and
-			// becomes the backedge in its place
-			n.isBackedge = out.isBackedge;
-			var rebuilt = List.new(n, head.tail);
-			while (pre != null) {
-				rebuilt = List.new(pre.head, rebuilt);
-				pre = pre.tail;
-			}
-			p.outgoing = rebuilt;
-			to.incoming = List.new(n, to.incoming);
-		}
-		// {b}->{to} is orphaned now that nothing reaches {b}
-		var keep: List<CfgEdge>;
-		for (l = to.incoming; l != null; l = l.tail) {
-			if (l.head != out) keep = List.new(l.head, keep);
-		}
-		to.incoming = keep;
-		b.incoming = null;
-		b.outgoing = null;
-	}
 }
 // A function starting with `loop` leaves ENTRY owning no instruction, since that opcode belongs to
 // the loop header it merges into. Control enters ENTRY's single successor unconditionally, so that
