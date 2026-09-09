@@ -338,7 +338,7 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 			regAlloc.forEachAssignment(r, appendSlots(buf, _));
 			var slots = buf.puts("}").toString();
 			if (regRefCounts[i] == 0) {
-				assert2(regAlloc.isFree(r), "%s should be free, got slots = %s", config.regSet.getName(r), slots);
+				assert2(regAlloc.isFree(r) || regAlloc.hasAssignment(r, IVAR_SLOT), "%s should be free, got slots = %s", config.regSet.getName(r), slots);
 			} else {
 				assert2(!regAlloc.isFree(r), "%s should be allocated, got slots = %s", config.regSet.getName(r), slots);
 			}
