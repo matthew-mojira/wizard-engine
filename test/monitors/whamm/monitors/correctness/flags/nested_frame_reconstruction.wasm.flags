@@ -1,1 +1,1 @@
---inline-max-depth=2
+--mode=jit --inline-max-depth=1
