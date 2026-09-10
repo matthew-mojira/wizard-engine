@@ -2,7 +2,6 @@
 // See LICENSE for details of Apache 2.0 license.
 
 def RT: X86_64Runtime;
-def UCONTEXT_RIP_OFFSET = 168;
 def PAGE_SIZE = 4096u;
 def PAGE_SIZE_i: int = 4096;
 def MMAP_RETRIES = 1;
@@ -34,20 +33,7 @@ component Target {
 			"use fast interpreter only");
 		Instrumentation.probes.onEnable = X86_64Interpreter.onProbeEnable;
 		Instrumentation.probes.onDisable = X86_64Interpreter.onProbeDisable;
-		RiRuntime.userSignalHandler = handleWasmStackOverflowFromRuntimeCall;
-	}
-
-	def handleWasmStackOverflowFromRuntimeCall(signum: int, siginfo: Pointer, ucontext: Pointer) -> bool {
-		if (signum != RiRuntime.SIGBUS && signum != RiRuntime.SIGSEGV) return false;
-		var ip = RiOs.getIp(ucontext);
-		if (RiRuntime.findUserCode(ip) != null) return false; // handled normally by that stub
-		var addr = RiOs.getAccessAddress(siginfo, ucontext);
-		if (!RedZones.isInRedZone(addr)) return false; // not a wasm-stack overflow
-		var stack = X86_64Runtime.curStack;
-		if (stack == null) return false;
-		var handler_ip = stack.handleOverflow(ip, stack.rsp + Pointer.SIZE);
-		(ucontext + UCONTEXT_RIP_OFFSET).store<Pointer>(handler_ip);
-		return true;
+		RiRuntime.userSignalHandler = X86_64Interpreter.handleWasmStackOverflowFromRuntimeCall;
 	}
 
 	def getOffsets() -> V3Offsets {

@@ -1,0 +1,2 @@
+// wasm stack overflow from a runtime call is only detected on x86-64-linux
+wizeng/deep_recursion_table_get_overflow.wasm

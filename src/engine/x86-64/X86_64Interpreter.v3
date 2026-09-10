@@ -19,6 +19,18 @@ component X86_64Interpreter {
 	def inCode(p: Pointer) -> bool {
 		return p >= interpreterCode.start && p < interpreterCode.end;
 	}
+	// Handle a wasm stack overflow that faults in a runtime call, where {ip} is in ordinary
+	// Virgil code owned by no {RiUserCode} and thus reaches no other signal handler.
+	def handleWasmStackOverflowFromRuntimeCall(signum: int, siginfo: Pointer, ucontext: Pointer) -> bool {
+		var ip = RiOs.getIp(ucontext);
+		if (RiRuntime.findUserCode(ip) != null) return false; // handled normally by that stub
+		var addr = RiOs.getAccessAddress(siginfo, ucontext);
+		if (!RedZones.isInRedZone(addr)) return false; // not a wasm-stack overflow
+		var stack = X86_64Runtime.curStack;
+		var handler_ip = stack.handleOverflow(ip, stack.rsp + Pointer.SIZE);
+		(ucontext + ucontext_rip_offset).store<Pointer>(handler_ip);
+		return true;
+	}
 	def computePCFromFrame(sp: Pointer) -> int {
 		if (Debug.interpreter) dumpFrame(sp);
 		if (!FeatureDisable.stacktraces) return (sp + X86_64InterpreterFrame.curpc.offset).load<int>();
