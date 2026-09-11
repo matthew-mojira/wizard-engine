@@ -38,6 +38,9 @@ class X86_64SinglePassCompiler extends SinglePassCompiler {
 	def markIVars() {
 		for (reg in X86_64MasmRegs.BORROWABLE_IVARS) regAlloc.assign(reg, IVAR_SLOT);
 	}
+	def evictIVars() {
+		for (reg in X86_64MasmRegs.BORROWABLE_IVARS) if (state.holdsIVar(reg)) regAlloc.free(reg);
+	}
 	// Writes the interpreter variable in {reg} out to its home in the interpreter frame.
 	// Must not be called for the dispatch register, which has no frame home.
 	def emitSaveIVar(reg: Reg) {
@@ -46,7 +49,7 @@ class X86_64SinglePassCompiler extends SinglePassCompiler {
 	}
 	// Reloads {reg}'s interpreter variable and re-marks it, if not already held.
 	def restoreIVar(reg: Reg) {
-		if (holdsIVar(reg)) return;
+		if (state.holdsIVar(reg)) return;
 		allocFixed(ValueKind.REF, reg, u32.!(IVAR_SLOT));
 		if (reg == INT.dispatch) {
 			if (!FeatureDisable.globalProbes) mmasm.emit_load_dispatch_table_reg(reg);

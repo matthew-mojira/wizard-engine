@@ -333,7 +333,7 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 			regAlloc.forEachAssignment(r, appendSlots(buf, _));
 			var slots = buf.puts("}").toString();
 			if (regRefCounts[i] == 0) {
-				assert2(regAlloc.isFree(r) || holdsIVar(r), "%s should be free, got slots = %s", config.regSet.getName(r), slots);
+				assert2(regAlloc.isFree(r) || state.holdsIVar(r), "%s should be free, got slots = %s", config.regSet.getName(r), slots);
 			} else {
 				assert2(!regAlloc.isFree(r), "%s should be allocated, got slots = %s", config.regSet.getName(r), slots);
 			}
@@ -2178,14 +2178,9 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 	def emitSaveIVar(reg: Reg);
 	// Reloads {reg}'s interpreter variable and re-marks it, if not already held.
 	def restoreIVar(reg: Reg);
-	// Returns {true} if {reg} currently holds its interpreter variable.
-	def holdsIVar(reg: Reg) -> bool {
-		found_ivar = false;
-		regAlloc.forEachAssignment(reg, noteIVar);
-		return found_ivar;
-	}
-	private var found_ivar: bool;
-	private def noteIVar(slot: int) { if (slot == IVAR_SLOT) found_ivar = true; }
+	// Frees every borrowable register still holding its interpreter variable, so the epilogue
+	// reloads them all; used after an outcall, which may have clobbered any of them.
+	def evictIVars();
 	// Emit code to materialize stack frames for each inlined function.
 	def emitReconstructStackFrames(frames: Array<SpcFrame>) -> int {
 		Metrics.spc_static_reconst.val++;
@@ -2404,6 +2399,7 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 				masm.emit_mov_r_m(ValueKind.REF, regs.mem0_base, frame.mem0_base_slot);
 			}
 		}
+		evictIVars();
 	}
 	def emit_load_instance(reg: Reg) {
 		if (whamm_config.is_inlined) { // inline compilation
@@ -2981,6 +2977,21 @@ class SpcState(regAlloc: RegAlloc) {
 	var ctl_stack = ArrayStack<SpcControl>.new();
 	// Frame management (for inlining)
 	var frame_stack = ArrayStack<SpcFrame>.new();
+	// Frees every register except those holding an interpreter variable ({IVAR_SLOT}): a
+	// fast handler pre-allocates them, and a reset must not lose that.
+	private def clearExceptIVars() {
+		regAlloc.forEachAllocatedReg(NO_REG, freeUnlessIVar);
+	}
+	private def freeUnlessIVar(reg: Reg) {
+		if (!holdsIVar(reg)) regAlloc.free(reg);
+	}
+	def holdsIVar(reg: Reg) -> bool {
+		found_ivar = false;
+		regAlloc.forEachAssignment(reg, noteIVar);
+		return found_ivar;
+	}
+	private var found_ivar: bool;
+	private def noteIVar(slot: int) { if (slot == IVAR_SLOT) found_ivar = true; }
 
 	// Reset the state for starting a new function.
 	def reset(sig: SigDecl, ret_label: MasmLabel) {
@@ -3077,7 +3088,7 @@ class SpcState(regAlloc: RegAlloc) {
 			resetTo(max, ctl.merge_state);
 		} else {
 			// merge not reached; push "bottom" value for all results
-			regAlloc.clear();
+			clearExceptIVars();
 			sp = ctl.val_stack_top;
 			for (i < sp) { // XXX: we clear register allocation state mostly for debug.
 				var sv = state[i];
@@ -3156,10 +3167,15 @@ class SpcState(regAlloc: RegAlloc) {
 		return SpcVal((from.flags & ~(IS_CONST)) | force_store, from.reg, 0);
 	}
 	private def resetTo(max: u32, nstate: Array<SpcVal>) {
-		regAlloc.clear();
+		clearExceptIVars();
 		for (i < max) {
 			var sv = nstate[i];
-			if (sv.inReg()) regAlloc.assign(sv.reg, int.!(i));
+			if (sv.inReg()) {
+				// control reaching here has {sv.reg} holding this slot, so an interpreter
+				// variable still marked in it is stale and must be released first
+				if (holdsIVar(sv.reg)) regAlloc.free(sv.reg);
+				regAlloc.assign(sv.reg, int.!(i));
+			}
 			state[i] = sv;
 		}
 		sp = max;
