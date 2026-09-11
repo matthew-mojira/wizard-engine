@@ -46,7 +46,7 @@ class X86_64SinglePassCompiler extends SinglePassCompiler {
 	}
 	// Reloads {reg}'s interpreter variable and re-marks it, if not already held.
 	def restoreIVar(reg: Reg) {
-		if (regAlloc.hasAssignment(reg, IVAR_SLOT)) return;
+		if (holdsIVar(reg)) return;
 		allocFixed(ValueKind.REF, reg, u32.!(IVAR_SLOT));
 		if (reg == INT.dispatch) {
 			if (!FeatureDisable.globalProbes) mmasm.emit_load_dispatch_table_reg(reg);

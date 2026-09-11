@@ -333,7 +333,7 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 			regAlloc.forEachAssignment(r, appendSlots(buf, _));
 			var slots = buf.puts("}").toString();
 			if (regRefCounts[i] == 0) {
-				assert2(regAlloc.isFree(r) || regAlloc.hasAssignment(r, IVAR_SLOT), "%s should be free, got slots = %s", config.regSet.getName(r), slots);
+				assert2(regAlloc.isFree(r) || holdsIVar(r), "%s should be free, got slots = %s", config.regSet.getName(r), slots);
 			} else {
 				assert2(!regAlloc.isFree(r), "%s should be allocated, got slots = %s", config.regSet.getName(r), slots);
 			}
@@ -2178,6 +2178,14 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 	def emitSaveIVar(reg: Reg);
 	// Reloads {reg}'s interpreter variable and re-marks it, if not already held.
 	def restoreIVar(reg: Reg);
+	// Returns {true} if {reg} currently holds its interpreter variable.
+	def holdsIVar(reg: Reg) -> bool {
+		found_ivar = false;
+		regAlloc.forEachAssignment(reg, noteIVar);
+		return found_ivar;
+	}
+	private var found_ivar: bool;
+	private def noteIVar(slot: int) { if (slot == IVAR_SLOT) found_ivar = true; }
 	// Emit code to materialize stack frames for each inlined function.
 	def emitReconstructStackFrames(frames: Array<SpcFrame>) -> int {
 		Metrics.spc_static_reconst.val++;

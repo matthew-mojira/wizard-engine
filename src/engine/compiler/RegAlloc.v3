@@ -15,7 +15,6 @@ class RegAlloc {
 	private var freebits: Array<int>;		// free status for each register, by pool
 	private var first: Array<int>;			// first assignment of each register
 	private var aliases: Array<List<int>>;		// overflow list of each register
-	var ivars: bool;				// pool includes the interpreter's registers
 
 	new(poolMap, pools, prev: RegAlloc) {
 		if (prev == null) {
@@ -64,20 +63,9 @@ class RegAlloc {
 	def isFree(reg: Reg) -> bool {
 		return first[reg.index] < 0;
 	}
-	// Returns {true} if {reg} currently has {assignment}, either as its first
-	// assignment or as an alias.
-	def hasAssignment(reg: Reg, assignment: int) -> bool {
-		if (first[reg.index] == assignment) return true;
-		for (l = aliases[reg.index]; l != null; l = l.tail) {
-			if (l.head == assignment) return true;
-		}
-		return false;
-	}
 	// Add an {assignment} to the register {reg}.
 	def assign(reg: Reg, assignment: int) {
 		if (first[reg.index] >= 0) {
-			// see the invariant on {SpcConsts.IVAR_SLOT}: free such a register first
-			if (first[reg.index] == SpcConsts.IVAR_SLOT) System.error("RegAllocError", "assign to a register holding its interpreter variable");
 			// already assigned; add an alias
 			aliases[reg.index] = List.new(assignment, aliases[reg.index]);
 			return;
@@ -144,34 +132,9 @@ class RegAlloc {
 		for (i < first.length) first[i] = -1;
 		for (i < aliases.length) aliases[i] = null;
 	}
-	// Removes all assignments except for registers that hold their interpreter variable.
-	// Re-marking after {clear()} preserves the full state, since a register holding
-	// {IVAR_SLOT} holds nothing else (see the invariant on {SpcConsts.IVAR_SLOT}).
-	def clearExceptIVars() -> this {
-		if (!ivars) { clear(); return; }
-		var regs = X86_64MasmRegs.BORROWABLE_IVARS;
-		var held = 0;
-		for (n < regs.length) {
-			if (hasAssignment(regs[n], SpcConsts.IVAR_SLOT)) held |= 1 << u5.view(n);
-		}
-		clear();
-		for (n < regs.length) {
-			if ((held & (1 << u5.view(n))) != 0) assign(regs[n], SpcConsts.IVAR_SLOT);
-		}
-	}
-	// Frees every register that currently holds its interpreter variable. Used before
-	// code that clobbers those registers (a call, or a raw move into one at a merge point).
-	def freeIVars() -> this {
-		if (!ivars) return;
-		for (reg in X86_64MasmRegs.BORROWABLE_IVARS) {
-			if (hasAssignment(reg, SpcConsts.IVAR_SLOT)) free(reg);
-		}
-	}
 	// Make a copy of this register allocator, including all of its current assignments.
 	def copy() -> RegAlloc {
-		var n = RegAlloc.new(poolMap, pools, this);
-		n.ivars = ivars;
-		return n;
+		return RegAlloc.new(poolMap, pools, this);
 	}
 	// Finds the allocated register of {kind} with the lowest score. The {addSpillCost}
 	// function takes {(score, reg, assign)} and should add the additional spill cost
