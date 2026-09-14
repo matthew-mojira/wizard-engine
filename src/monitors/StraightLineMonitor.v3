@@ -1,0 +1,302 @@
+// Copyright 2026 Wizard Authors. All rights reserved.
+// See LICENSE for details of Apache 2.0 license.
+
+def E = MonitorRegistry.add(
+	"straightline", "Straight-lines one path through a function.",
+	StraightLineMonitor.new());
+
+def func_opt = E.options.newIntOption("func", -1, "index of the function to straight-line");
+def path_opt = E.options.newStringOption("path", null, "block start pcs along the path, colon-separated");
+
+// Emits a copy of one function with a single path through it laid out straight. Every control-flow
+// instruction is removed, so the copy computes the right answer only for inputs that would have
+// followed that path.
+class StraightLineMonitor extends Monitor {
+	def cfgBuilder = CfgBuilder.new();
+	def calls = Vector<Array<Value>>.new();
+	var module: Module;
+	var orig: FuncDecl;
+	var code: Array<byte>;
+	var probe: ArgProbe;
+	var actions: Array<byte>; // what became of the instruction at each pc
+
+	def onParse(m: Module, err: ErrorGen) {
+		module = m;
+		def pcs = parsePcs(path_opt.val);
+		if (pcs == null) {
+			err.abs(0).set("expected path=<pc>:<pc>:...");
+			return;
+		}
+		def fi = func_opt.val;
+		if (fi < 0 || fi >= m.functions.length) {
+			err.abs(0).set(Strings.format1("func index %d out of range", fi));
+			return;
+		}
+		def f = m.functions[fi];
+		if (f.imp != null) {
+			err.abs(0).set(Strings.format1("function #%d is imported and has no body", fi));
+			return;
+		}
+		orig = f;
+		def path = resolvePath(f, pcs, err);
+		if (path == null) return;
+		code = emit(f, path);
+		probe = ArgProbe.new(f, calls);
+		Instrumentation.insertFuncEntryProbe(m, f.func_index, probe);
+	}
+	// Maps each start pc onto its block and checks that the sequence is one acyclic route from
+	// ENTRY to EXIT, reporting through {err} and returning null for any sequence that is not.
+	def resolvePath(f: FuncDecl, pcs: Array<int>, err: ErrorGen) -> Array<CfgBlock> {
+		if (hasHandlers(f)) {
+			err.abs(0).set("function contains try/try_table, which the CFG builder cannot handle");
+			return null;
+		}
+		def built = cfgBuilder.build(f);
+		def entry = built.0, exit = built.1;
+		cfgBuilder.spliceEmptyBlocks(entry, exit);
+		def blocks = Vector<CfgBlock>.new();
+		entry.dfs(blocks.put, null, null);
+
+		def path = Array<CfgBlock>.new(pcs.length);
+		for (i < pcs.length) {
+			def b = findByStart(blocks, pcs[i]);
+			if (b == null) {
+				return fail(err, pcs[i], "no block starts at +%d");
+			}
+			path[i] = b;
+			for (j < i) {
+				if (pcs[j] == pcs[i]) {
+					return fail(err, pcs[i], "+%d appears twice, so the path is not acyclic");
+				}
+			}
+		}
+		if (path[0] != entry) {
+			return fail(err, pcs[0], "path starts at +%d, which is not the entry block");
+		}
+		if (path[path.length - 1] != exit) {
+			return fail(err, pcs[pcs.length - 1], "path ends at +%d, which is not the exit block");
+		}
+		for (i < path.length - 1) {
+			def e = edgeBetween(path[i], path[i + 1]);
+			if (e == null) {
+				return fail(err, pcs[i], "no edge leaves the block at +%d for the next one on the path");
+			}
+			if (e.isBackedge) {
+				return fail(err, pcs[i], "the edge out of +%d is a backedge, so the path is not acyclic");
+			}
+		}
+		return path;
+	}
+	// Concatenates the path's blocks, keeping the function's own local declarations as a prefix.
+	def emit(f: FuncDecl, path: Array<CfgBlock>) -> Array<byte> {
+		def buf = Vector<byte>.new();
+		actions = Array<byte>.new(f.orig_bytecode.length);
+		def bi = BytecodeIterator.new().reset(f);
+		bi.current(); // skips the local declarations, leaving {bi.pc} on the first instruction
+		def body_start = bi.pc;
+		for (i < body_start) buf.put(f.orig_bytecode[i]);
+
+		for (i < path.length) {
+			def b = path[i];
+			def next = if(i + 1 < path.length, path[i + 1]);
+			var pc = b.start;
+			while (pc >= 0 && pc < b.end) {
+				bi.at(pc, -1);
+				def op = bi.current();
+				def end = bi.nextPc();
+				actions[pc] = emitInstr(f, b, next, op, pc, end, buf);
+				pc = end;
+			}
+		}
+		buf.put(u8.!(Opcode.END.code));
+		return buf.extract();
+	}
+	// A branch on the path is deleted, but whatever it would have popped still has to be consumed.
+	def emitInstr(f: FuncDecl, b: CfgBlock, next: CfgBlock, op: Opcode, pc: int, end: int, buf: Vector<byte>) -> byte {
+		match (op) {
+			// labels and merge points have no meaning without branches
+			BLOCK, LOOP, END, ELSE, BR => return REMOVED;
+			// the selector is consumed on either arm
+			BR_IF, BR_TABLE, IF => {
+				buf.put(u8.!(Opcode.DROP.code));
+				return REPLACED;
+			}
+			// the tested value stays on the stack on either arm
+			BR_ON_CAST, BR_ON_CAST_FAIL => return REMOVED;
+			BR_ON_NULL => {
+				if (!tookTakenArm(b, next)) return REMOVED;
+				buf.put(u8.!(Opcode.DROP.code));
+				return REPLACED;
+			}
+			BR_ON_NON_NULL => {
+				if (tookTakenArm(b, next)) return REMOVED;
+				buf.put(u8.!(Opcode.DROP.code));
+				return REPLACED;
+			}
+			_ => {
+				for (k = pc; k < end; k++) buf.put(f.orig_bytecode[k]);
+				return KEPT;
+			}
+		}
+	}
+	def onFinish(i: Instance, r: Result) {
+		if (code == null) return;
+		out.beginColor(Color.FUNC).put1("straight-lining %q", orig.render(module.names, _)).endColors().ln();
+		printListing(orig);
+		def copy = synthesize(i);
+		if (copy == null) return;
+		out.beginColor(Color.FUNC).puts("result").endColors().ln();
+		printFunc(WasmFunction.!(copy).decl);
+
+		// re-running the original fires its own entry probe, which would append to {calls}
+		probe.on = false;
+		var matched = 0, differed = 0;
+		for (k < calls.length) {
+			def args = calls[k];
+			def got = Execute.call(copy, args);
+			def want = Execute.call(i.functions[orig.func_index], args);
+			if (want.equals(got)) matched++;
+			else differed++;
+		}
+		out.put3("  %d calls recorded, %d matched, %d differed", calls.length, matched, differed).ln();
+	}
+	// Builds the straight-lined copy as a new function of the module, bound to this instance.
+	def synthesize(i: Instance) -> Function {
+		def f = FuncDecl.new(orig.sig_index);
+		f.setOrigCode(code);
+		f.sig = orig.sig;
+		f.func_index = module.functions.length + module.new_funcs++;
+		def err = ErrorGen.new(module.filename);
+		def ext = Extension.set.all;
+		Execute.tiering.onFuncBody(module, u32.!(f.func_index), code, err);
+		def v = CodeValidator.new(ext, Limits.new().set(ext), module, err);
+		match (v.validateFunc(f, 0)) {
+			Ok => ;
+			Error(error_code, error_pos, error_msg) => {
+				out.put2("straightline: generated code is invalid at +%d: %s", error_pos, error_msg).ln();
+				return null;
+			}
+		}
+		def wf = WasmFunction.new(i, f);
+		Execute.tiering.onNewFunction(wf, err);
+		return wf;
+	}
+	// The whole original function, marking what became of each instruction.
+	def printListing(f: FuncDecl) {
+		def p = CfgPrinter.new();
+		def entries = p.compute(module, f);
+		var act = KEPT;
+		for (j < entries.length) {
+			def e = entries[j];
+			// a continuation line carries no pc of its own, so it stays with the row above it
+			if (e.pc >= 0) act = actions[e.pc];
+			out.beginColor(colorOf(act));
+			out.sp();
+			e.render(p.lmax, p.rmax, out);
+			def note = noteOf(act);
+			if (e.pc >= 0 && note.length > 0) out.puts(note);
+			out.endColors();
+			out.ln();
+		}
+	}
+	def printFunc(f: FuncDecl) {
+		def p = CfgPrinter.new();
+		def entries = p.compute(module, f);
+		for (j < entries.length) {
+			out.beginColor(Color.COVERED);
+			out.sp();
+			entries[j].render(p.lmax, p.rmax, out);
+			out.endColors();
+			out.ln();
+		}
+	}
+}
+
+def colorOf(act: byte) -> Color {
+	match (act) {
+		REPLACED => return Color.MEDIUM;
+		KEPT => return Color.COVERED;
+		_ => return Color.INACTIVE;
+	}
+}
+def noteOf(act: byte) -> string {
+	match (act) {
+		REPLACED => return "replaced by drop";
+		REMOVED => return "removed";
+		KEPT => return "";
+		_ => return "removed, block not on path";
+	}
+}
+
+// what became of the instruction at a given pc
+def KEPT: byte = 1;
+def REMOVED: byte = 2;
+def REPLACED: byte = 3;
+
+// Records the arguments of every call, so the straight-lined copy can be run on the same inputs.
+class ArgProbe(func: FuncDecl, calls: Vector<Array<Value>>) extends Probe {
+	var on = true;
+
+	def fire(dynamicLoc: DynamicLoc) -> ProbeAction {
+		if (!on) return ProbeAction.Continue;
+		def n = func.sig.params.length;
+		def args = Array<Value>.new(n);
+		def acc = dynamicLoc.frame.getFrameAccessor();
+		for (i < n) args[i] = acc.getLocal(i);
+		calls.put(args);
+		return ProbeAction.Continue;
+	}
+}
+
+// Records a path-construction error at the offending pc, which {fmt} must render with %d.
+def fail(err: ErrorGen, pc: int, fmt: string) -> Array<CfgBlock> {
+	err.abs(u64.!(pc)).set(Strings.format1(fmt, pc));
+	return null;
+}
+def findByStart(blocks: Vector<CfgBlock>, pc: int) -> CfgBlock {
+	for (i < blocks.length) {
+		if (blocks[i].start == pc) return blocks[i];
+	}
+	return null;
+}
+def edgeBetween(from: CfgBlock, to: CfgBlock) -> CfgEdge {
+	for (l = from.outgoing; l != null; l = l.tail) {
+		if (l.head.target == to) return l.head;
+	}
+	return null;
+}
+// {outgoing} is [fallthrough, taken] for a two-way branch, the order the profiler's probes rely on.
+def tookTakenArm(b: CfgBlock, next: CfgBlock) -> bool {
+	def o = b.outgoing;
+	if (o == null || o.tail == null) return false;
+	return o.tail.head.target == next;
+}
+// The CFG builder faults on exception handlers, so they have to be caught before it runs.
+def hasHandlers(f: FuncDecl) -> bool {
+	def bi = BytecodeIterator.new().reset(f);
+	while (bi.more()) {
+		match (bi.current()) {
+			TRY, TRY_TABLE => return true;
+			_ => ;
+		}
+		bi.next();
+	}
+	return false;
+}
+def parsePcs(s: string) -> Array<int> {
+	if (s == null) return null;
+	def v = Vector<int>.new();
+	var i = 0;
+	while (i < s.length) {
+		def t = Ints.parsePosDecimal(s, i);
+		if (t.0 == 0) return null;
+		v.put(int.!(t.1));
+		i += t.0;
+		if (i < s.length) {
+			if (s[i] != ':') return null;
+			i++;
+		}
+	}
+	if (v.length == 0) return null;
+	return v.extract();
+}
