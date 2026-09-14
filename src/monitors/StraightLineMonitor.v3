@@ -90,7 +90,7 @@ class StraightLineMonitor extends Monitor {
 	}
 	// Concatenates the path's blocks, keeping the function's own local declarations as a prefix.
 	def emit(f: FuncDecl, path: Array<CfgBlock>) -> Array<byte> {
-		def buf = Vector<byte>.new();
+		def buf = WasmAsm.new();
 		actions = Array<byte>.new(f.orig_bytecode.length);
 		def bi = BytecodeIterator.new().reset(f);
 		bi.current(); // skips the local declarations, leaving {bi.pc} on the first instruction
@@ -104,44 +104,58 @@ class StraightLineMonitor extends Monitor {
 			var pc = b.start;
 			while (pc >= 0 && pc < b.end) {
 				bi.at(pc, -1);
-				def op = bi.current();
-				def end = bi.nextPc();
-				actions[pc] = emitInstr(f, b, next, exit, op, pc, end, buf);
-				pc = end;
+				actions[pc] = emitInstr(f, bi, b, next, exit, buf);
+				pc = bi.nextPc();
 			}
 		}
 		return buf.extract();
 	}
-	// A branch on the path is deleted, but whatever it would have popped still has to be consumed.
-	def emitInstr(f: FuncDecl, b: CfgBlock, next: CfgBlock, exit: CfgBlock, op: Opcode, pc: int, end: int, buf: Vector<byte>) -> byte {
+	// A branch on the path is deleted, but whatever it would have popped still has to be consumed, and
+	// a value its arm narrows still has to be narrowed.
+	def emitInstr(f: FuncDecl, bi: BytecodeIterator, b: CfgBlock, next: CfgBlock, exit: CfgBlock, buf: WasmAsm) -> byte {
+		def op = bi.current();
 		match (op) {
 			// labels and merge points have no meaning without branches
 			BLOCK, LOOP, ELSE, BR => return REMOVED;
 			// only the function's own `end`, which EXIT owns, still terminates something
 			END => {
 				if (b != exit) return REMOVED;
-				buf.put(u8.!(Opcode.END.code));
+				buf.end();
 				return KEPT;
 			}
 			// the selector is consumed on either arm
 			BR_IF, BR_TABLE, IF => {
-				buf.put(u8.!(Opcode.DROP.code));
+				buf.drop();
 				return REPLACED;
 			}
-			// the tested value stays on the stack on either arm
-			BR_ON_CAST, BR_ON_CAST_FAIL => return REMOVED;
+			// the tested value is consumed on the null arm and continues non-null on the other
 			BR_ON_NULL => {
-				if (!tookTakenArm(b, next)) return REMOVED;
-				buf.put(u8.!(Opcode.DROP.code));
+				if (tookTakenArm(b, next)) buf.drop();
+				else buf.ref_as_non_null();
 				return REPLACED;
 			}
 			BR_ON_NON_NULL => {
-				if (tookTakenArm(b, next)) return REMOVED;
-				buf.put(u8.!(Opcode.DROP.code));
+				if (tookTakenArm(b, next)) buf.ref_as_non_null();
+				else buf.drop();
+				return REPLACED;
+			}
+			// the value continues cast on the success arm, and on the failure arm is non-null exactly
+			// when both types admit null, since a null would have succeeded
+			BR_ON_CAST, BR_ON_CAST_FAIL => {
+				def imm = bi.immptr().read_BrOnCastImm();
+				if (tookTakenArm(b, next) == (op == Opcode.BR_ON_CAST)) {
+					def cast = if(imm.null2(), Opcode.REF_CAST_NULL, Opcode.REF_CAST);
+					buf.put(cast.prefix);
+					buf.put_u32leb(cast.code).put_s32leb(imm.ht2);
+					return REPLACED;
+				}
+				if (!imm.null1() || !imm.null2()) return REMOVED;
+				buf.ref_as_non_null();
 				return REPLACED;
 			}
 			_ => {
-				for (k = pc; k < end; k++) buf.put(f.orig_bytecode[k]);
+				def end = bi.nextPc();
+				for (k = bi.pc; k < end; k++) buf.put(f.orig_bytecode[k]);
 				return KEPT;
 			}
 		}
@@ -228,7 +242,7 @@ def colorOf(act: byte) -> Color {
 }
 def noteOf(act: byte) -> string {
 	match (act) {
-		REPLACED => return "replaced by drop";
+		REPLACED => return "replaced";
 		REMOVED => return "removed";
 		KEPT => return "";
 		_ => return "removed, block not on path";
