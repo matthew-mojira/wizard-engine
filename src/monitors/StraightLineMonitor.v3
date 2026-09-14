@@ -53,6 +53,7 @@ class StraightLineMonitor extends Monitor {
 		}
 		def built = cfgBuilder.build(f);
 		def entry = built.0, exit = built.1;
+		cfgBuilder.addReturnEdges(f, entry, exit);
 		cfgBuilder.spliceEmptyBlocks(entry, exit);
 		def blocks = Vector<CfgBlock>.new();
 		entry.dfs(blocks.put, null, null);
@@ -96,6 +97,7 @@ class StraightLineMonitor extends Monitor {
 		def body_start = bi.pc;
 		for (i < body_start) buf.put(f.orig_bytecode[i]);
 
+		def exit = path[path.length - 1];
 		for (i < path.length) {
 			def b = path[i];
 			def next = if(i + 1 < path.length, path[i + 1]);
@@ -104,18 +106,23 @@ class StraightLineMonitor extends Monitor {
 				bi.at(pc, -1);
 				def op = bi.current();
 				def end = bi.nextPc();
-				actions[pc] = emitInstr(f, b, next, op, pc, end, buf);
+				actions[pc] = emitInstr(f, b, next, exit, op, pc, end, buf);
 				pc = end;
 			}
 		}
-		buf.put(u8.!(Opcode.END.code));
 		return buf.extract();
 	}
 	// A branch on the path is deleted, but whatever it would have popped still has to be consumed.
-	def emitInstr(f: FuncDecl, b: CfgBlock, next: CfgBlock, op: Opcode, pc: int, end: int, buf: Vector<byte>) -> byte {
+	def emitInstr(f: FuncDecl, b: CfgBlock, next: CfgBlock, exit: CfgBlock, op: Opcode, pc: int, end: int, buf: Vector<byte>) -> byte {
 		match (op) {
 			// labels and merge points have no meaning without branches
-			BLOCK, LOOP, END, ELSE, BR => return REMOVED;
+			BLOCK, LOOP, ELSE, BR => return REMOVED;
+			// only the function's own `end`, which EXIT owns, still terminates something
+			END => {
+				if (b != exit) return REMOVED;
+				buf.put(u8.!(Opcode.END.code));
+				return KEPT;
+			}
 			// the selector is consumed on either arm
 			BR_IF, BR_TABLE, IF => {
 				buf.put(u8.!(Opcode.DROP.code));

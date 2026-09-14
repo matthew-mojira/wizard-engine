@@ -17,7 +17,7 @@ class PathProfilingMonitor extends Monitor {
 			def exit = cfgExit.1;
 
 			// every path must end at EXIT, so route all `return`s to EXIT
-			addReturnEdges(cfgBuilder, func, cfgExit.0, exit);
+			cfgBuilder.addReturnEdges(func, cfgExit.0, exit);
 			// remove empty blocks so that remaining blocks have an instruction to increment
 			cfgBuilder.spliceEmptyBlocks(cfgExit.0, exit);
 			def cfg = advanceEntry(cfgExit.0);
@@ -169,21 +169,6 @@ def advanceEntry(entry: CfgBlock) -> CfgBlock {
 	}
 	return b;
 }
-// Links each block ending in `return` to EXIT, which the CFG leaves without a successor. A block
-// ending in `unreachable` or `throw` traps instead, so it never reaches EXIT and gets no edge.
-def addReturnEdges(cb: CfgBuilder, func: FuncDecl, entry: CfgBlock, exit: CfgBlock) {
-	def bi = BytecodeIterator.new().reset(func);
-	// post-order, as addDummies
-	entry.dfs(null, null, fun (b: CfgBlock) {
-		if (b.outgoing != null || b == exit || b.last_instr_pc < 0) return;
-		bi.at(b.last_instr_pc, -1);
-		match (bi.current()) {
-			RETURN, RETURN_CALL, RETURN_CALL_INDIRECT, RETURN_CALL_REF => cb.link(b.last_instr_pc, b, exit);
-			_ => ;
-		}
-	});
-}
-
 // Val(e) / NumPaths(v) assignment (Ball-Larus). Algorithm for assigning values to edges in a DAG, Fig. 5
 // Assigning integer values to edges such that no two paths compute the same path sum: Section 3.2
 def assignVals(cfg: CfgBlock, exit: CfgBlock) {

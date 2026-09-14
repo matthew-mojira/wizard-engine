@@ -81,6 +81,20 @@ class CfgBuilder {
 			b.outgoing = null;
 		}
 	}
+	// Links each block ending in `return` to EXIT, which the CFG leaves without a successor. A block
+	// ending in `unreachable` or `throw` traps instead, so it never reaches EXIT and gets no edge.
+	def addReturnEdges(func: FuncDecl, entry: CfgBlock, exit: CfgBlock) {
+		bi.reset(func);
+		// post-order, so the dfs never walks an edge added here
+		entry.dfs(null, null, fun (b: CfgBlock) {
+			if (b.outgoing != null || b == exit || b.last_instr_pc < 0) return;
+			bi.at(b.last_instr_pc, -1);
+			match (bi.current()) {
+				RETURN, RETURN_CALL, RETURN_CALL_INDIRECT, RETURN_CALL_REF => link(b.last_instr_pc, b, exit);
+				_ => ;
+			}
+		});
+	}
 	// prepends, so {outgoing} is in reverse branch-label order
 	def link(pc: int, from: CfgBlock, to: CfgBlock) -> CfgEdge {
 		if (verbose) Trace.OUT.put2("add id:%d -> id:%d", from.id, to.id).ln();
