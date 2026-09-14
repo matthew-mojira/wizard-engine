@@ -178,7 +178,7 @@ def addReturnEdges(cb: CfgBuilder, func: FuncDecl, entry: CfgBlock, exit: CfgBlo
 		if (b.outgoing != null || b == exit || b.last_instr_pc < 0) return;
 		bi.at(b.last_instr_pc, -1);
 		match (bi.current()) {
-			RETURN, RETURN_CALL, RETURN_CALL_INDIRECT => cb.link(b.last_instr_pc, b, exit);
+			RETURN, RETURN_CALL, RETURN_CALL_INDIRECT, RETURN_CALL_REF => cb.link(b.last_instr_pc, b, exit);
 			_ => ;
 		}
 	});
