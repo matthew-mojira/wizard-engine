@@ -54,7 +54,7 @@ class PathProfilingMonitor extends Monitor {
 			func.frame_var_tags = if(func.frame_var_tags == null, tag, Arrays.concat(func.frame_var_tags, tag));
 
 			// place probes, covering the edges each decision dispatches to
-			def counts: Array<int> = Array<int>.new(numPaths);
+			def counts = PathCounts.new(numPaths);
 			placeProbes(m, func, rvar, st, counts);
 
 			entries.put(PathProfileEntry.new(m, func, cfg, exit, st, counts, numPaths));
@@ -67,8 +67,21 @@ class PathProfilingMonitor extends Monitor {
 			printCfg(out, e.cfg, e.st);
 			// the block sequence each path number denotes, so counts[k] can be read back to a route
 			def paths = enumPaths(e.cfg, e.exit, e.numPaths);
+			// each call site lists only the paths its calls took
+			for (s < e.counts.sites.length) {
+				def site = e.counts.sites[s], counts = e.counts.counts[s];
+				match (site.0) {
+					null => out.puts("  caller engine");
+					x: WasmFunction => out.put2("  caller %q +%d", x.renderShort, site.1);
+					x: HostFunction => out.put1("  caller %q", x.render);
+				}
+				out.ln();
+				for (k < counts.length) {
+					if (counts[k] > 0) out.put2("    counts[%d] = %d", k, counts[k]).ln();
+				}
+			}
 			for (k < e.numPaths) {
-				out.put2("  counts[%d] = %d", k, e.counts[k]).ln();
+				out.put2("  counts[%d] = %d", k, e.counts.total(k)).ln();
 				if (paths != null && paths[k] != null) {
 					out.puts("      path:");
 					for (l = paths[k]; l != null; l = l.tail) out.put1(" %d", l.head);
@@ -89,8 +102,38 @@ class PathProfilingMonitor extends Monitor {
 // {module} is per-entry, not a monitor field: onParse runs once per module while {entries}
 // accumulates across all of them, so a shared field would render every name against the last one
 private class PathProfileEntry(module: Module, func: FuncDecl, cfg: CfgBlock, exit: CfgBlock,
-	st: SpanningTree, counts: Array<int>, numPaths: int) {
-	// TODO this counts is caller-independent, where we probably want it also indexed by caller (location)
+	st: SpanningTree, counts: PathCounts, numPaths: int) {
+}
+// A function's path counts, kept separately for each call site: the calling function and the pc
+// of its call, where a host caller has no pc and the engine is a null caller.
+private class PathCounts(numPaths: int) {
+	def sites = Vector<(Function, int)>.new();
+	def counts = Vector<Array<int>>.new();
+
+	def inc(accessor: FrameAccessor, path: int) {
+		var site: (Function, int);
+		match (accessor.caller()) {
+			None => site = (null, -1);
+			Wasm(func, pc, frame) => site = (func, pc);
+			Host(func, frame) => site = (func, -1);
+		}
+		for (i < sites.length) {
+			if (sites[i] == site) {
+				counts[i][path]++;
+				return;
+			}
+		}
+		sites.put(site);
+		def c = Array<int>.new(numPaths);
+		c[path] = 1;
+		counts.put(c);
+	}
+	// the count for {path} across every call site
+	def total(path: int) -> int {
+		var sum = 0;
+		for (i < counts.length) sum += counts[i][path];
+		return sum;
+	}
 }
 
 // the CFG nodes this monitor analyses, carrying its own Ball-Larus state
@@ -344,7 +387,7 @@ def kruskals(entry: CfgBlock, exit: CfgBlock) -> SpanningTree {
 }
 
 // runtime actions an edge can carry, executed against the per-activation register {r} and the
-// per-function path-count histogram {counts}
+// path-count histogram {counts} of the activation's call site
 private type Action {
 	case Nothing;                // no instrumentation placed on this edge (the default)
 	case RSet(value: int);       // r = value
@@ -453,23 +496,16 @@ def setR(accessor: FrameAccessor, rvar: int, v: int) {
 	accessor.getWriter().setFrameVar(rvar, Values.box_i(v));
 }
 // runs whatever Fig. 8 instrumented onto {te}, at the instruction that owns it
-def execEdge(accessor: FrameAccessor, rvar: int, te: PathEdge, counts: Array<int>) {
+def execEdge(accessor: FrameAccessor, rvar: int, te: PathEdge, counts: PathCounts) {
 	match (te.action) {
 		Nothing => ;
 		RSet(value) => setR(accessor, rvar, value);
 		RAdd(value) => setR(accessor, rvar, getR(accessor, rvar) + value);
-		CountR => {
-			def r = getR(accessor, rvar);
-			counts[r] = counts[r] + 1;
-		}
-		CountConst(value) => counts[value] = counts[value] + 1;
-		CountRPlus(value) => {
-			def i = getR(accessor, rvar) + value;
-			counts[i] = counts[i] + 1;
-		}
+		CountR => counts.inc(accessor, getR(accessor, rvar));
+		CountConst(value) => counts.inc(accessor, value);
+		CountRPlus(value) => counts.inc(accessor, getR(accessor, rvar) + value);
 		CountReset(add, set) => {
-			def i = getR(accessor, rvar) + add;
-			counts[i] = counts[i] + 1;
+			counts.inc(accessor, getR(accessor, rvar) + add);
 			setR(accessor, rvar, set);
 		}
 		SelfLoop => te.selfLoopCount = te.selfLoopCount + 1;
@@ -478,7 +514,7 @@ def execEdge(accessor: FrameAccessor, rvar: int, te: PathEdge, counts: Array<int
 
 // Attaches the probes for one function, each at the {last_instr_pc} of the block whose edges it
 // instruments. Runs after the Fig. 8 passes and placeBackedges, whose Actions it reads.
-def placeProbes(m: Module, func: FuncDecl, rvar: int, st: SpanningTree, counts: Array<int>) {
+def placeProbes(m: Module, func: FuncDecl, rvar: int, st: SpanningTree, counts: PathCounts) {
 	def bi = BytecodeIterator.new().reset(func);
 	// instrument blocks that were marked for instrumentation
 	def blocks = st.instrumented.toArray();
@@ -531,7 +567,7 @@ def placeProbes(m: Module, func: FuncDecl, rvar: int, st: SpanningTree, counts: 
 	}
 }
 // a block whose single outgoing edge is taken whenever the block is entered
-private class EdgeProbe(rvar: int, te: PathEdge, counts: Array<int>) extends Probe {
+private class EdgeProbe(rvar: int, te: PathEdge, counts: PathCounts) extends Probe {
 	def fire(loc: DynamicLoc) -> ProbeAction {
 		execEdge(loc.frame.getFrameAccessor(), rvar, te, counts);
 		return ProbeAction.Continue;
@@ -541,7 +577,7 @@ private class EdgeProbe(rvar: int, te: PathEdge, counts: Array<int>) extends Pro
 // [fallthrough, taken] for a two-way branch and the labels in order for br_table, whose last entry
 // is the default. Each branch opcode has its own subclass supplying {select}, so the opcode is
 // resolved once when the probe is built rather than on every execution.
-private class BranchProbe(rvar: int, edges: Array<PathEdge>, counts: Array<int>) extends Probe {
+private class BranchProbe(rvar: int, edges: Array<PathEdge>, counts: PathCounts) extends Probe {
 	def fire(loc: DynamicLoc) -> ProbeAction {
 		def accessor = loc.frame.getFrameAccessor();
 		execEdge(accessor, rvar, edges[select(accessor, accessor.getOperand(0))], counts);
@@ -552,14 +588,14 @@ private class BranchProbe(rvar: int, edges: Array<PathEdge>, counts: Array<int>)
 }
 // br_if, and the br_on_* that read an i32
 private class BrIfProbe extends BranchProbe {
-	new(rvar: int, edges: Array<PathEdge>, counts: Array<int>) super(rvar, edges, counts) { }
+	new(rvar: int, edges: Array<PathEdge>, counts: PathCounts) super(rvar, edges, counts) { }
 	def select(accessor: FrameAccessor, v: Value) -> int {
 		return if(Values.unbox_u(v) != 0, 1, 0);
 	}
 }
 // an out-of-range index takes the default label, which is the last edge
 private class BrTableProbe extends BranchProbe {
-	new(rvar: int, edges: Array<PathEdge>, counts: Array<int>) super(rvar, edges, counts) { }
+	new(rvar: int, edges: Array<PathEdge>, counts: PathCounts) super(rvar, edges, counts) { }
 	def select(accessor: FrameAccessor, v: Value) -> int {
 		def u = Values.unbox_u(v);
 		return if(u >= u32.!(edges.length), edges.length - 1, int.!(u));
@@ -568,7 +604,7 @@ private class BrTableProbe extends BranchProbe {
 // br_on_null when {nullTaken}, br_on_non_null otherwise
 private class BrOnNullProbe extends BranchProbe {
 	def nullTaken: bool;
-	new(rvar: int, edges: Array<PathEdge>, counts: Array<int>, nullTaken) super(rvar, edges, counts) { }
+	new(rvar: int, edges: Array<PathEdge>, counts: PathCounts, nullTaken) super(rvar, edges, counts) { }
 	def select(accessor: FrameAccessor, v: Value) -> int {
 		return if(Values.isNull(v) == nullTaken, 1, 0);
 	}
@@ -580,7 +616,7 @@ private class BrOnCastProbe extends BranchProbe {
 	def nullable: bool;
 	def ht: int;
 	def successTaken: bool;
-	new(rvar: int, edges: Array<PathEdge>, counts: Array<int>, nullable, ht, successTaken)
+	new(rvar: int, edges: Array<PathEdge>, counts: PathCounts, nullable, ht, successTaken)
 		super(rvar, edges, counts) { }
 	def select(accessor: FrameAccessor, v: Value) -> int {
 		def ok = Runtime.cast(accessor.func().instance, nullable, ht, v);
