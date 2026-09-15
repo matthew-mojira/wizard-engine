@@ -19,6 +19,8 @@ class StraightLineMonitor extends Monitor {
 	var code: Array<byte>;
 	var probe: ArgProbe;
 	var actions: Array<byte>; // what became of the instruction at each pc
+	def scratch = Vector<ValueType>.new(); // types of the locals appended to the copy's declarations
+	var stMap: SidetableMap;
 
 	def onParse(m: Module, err: ErrorGen) {
 		module = m;
@@ -88,14 +90,16 @@ class StraightLineMonitor extends Monitor {
 		}
 		return path;
 	}
-	// Concatenates the path's blocks, keeping the function's own local declarations as a prefix.
+	// Concatenates the path's blocks after the function's own local declarations, which are extended
+	// by the scratch locals the blocks needed.
 	def emit(f: FuncDecl, path: Array<CfgBlock>) -> Array<byte> {
-		def buf = WasmAsm.new();
+		def body = WasmAsm.new();
 		actions = Array<byte>.new(f.orig_bytecode.length);
+		scratch.resize(0);
+		stMap = SidetableMap.new(f);
 		def bi = BytecodeIterator.new().reset(f);
 		bi.current(); // skips the local declarations, leaving {bi.pc} on the first instruction
 		def body_start = bi.pc;
-		for (i < body_start) buf.put(f.orig_bytecode[i]);
 
 		def exit = path[path.length - 1];
 		for (i < path.length) {
@@ -104,11 +108,53 @@ class StraightLineMonitor extends Monitor {
 			var pc = b.start;
 			while (pc >= 0 && pc < b.end) {
 				bi.at(pc, -1);
-				actions[pc] = emitInstr(f, bi, b, next, exit, buf);
+				actions[pc] = emitInstr(f, bi, b, next, exit, body);
 				pc = bi.nextPc();
 			}
 		}
+
+		// each declaration group is copied as-is, with one group appended per scratch local
+		def buf = WasmAsm.new();
+		def cp = CodePtr.new(f.orig_bytecode);
+		buf.put_u32leb(int.!(cp.read_uleb32()) + scratch.length);
+		for (i = cp.pos; i < body_start; i++) buf.put(f.orig_bytecode[i]);
+		for (i < scratch.length) {
+			buf.put_u32leb(1);
+			putValueType(buf, scratch[i]);
+		}
+		buf.puta(body.extract());
 		return buf.extract();
+	}
+	// A taken branch passes its label's values on and discards the values beneath them, so those
+	// values are saved to scratch locals, the rest dropped, and the saved values reloaded.
+	def emitUnwind(f: FuncDecl, pc: int, depth: int, offset: int, buf: WasmAsm) -> bool {
+		def e = f.sidetable.getBrEntry(stMap[pc] + offset);
+		if (e.popcount == 0) return false;
+		def types = if(e.valcount > 0, labelTypes(f, pc, depth), SigCache.arr_v);
+		def base = f.num_locals + scratch.length;
+		scratch.puta(types);
+		for (i = types.length - 1; i >= 0; i--) buf.local_set(base + i);
+		for (i < e.popcount) buf.drop();
+		for (i < types.length) buf.local_get(base + i);
+		return true;
+	}
+	// The values a branch at {pc} passes to label {depth}: a loop's params, any other label's results.
+	def labelTypes(f: FuncDecl, pc: int, depth: int) -> Array<ValueType> {
+		def labels = Vector<Array<ValueType>>.new();
+		labels.put(f.sig.results);
+		def bi = BytecodeIterator.new().reset(f);
+		while (bi.more()) {
+			def op = bi.current();
+			if (bi.pc >= pc) break;
+			match (op) {
+				BLOCK, IF, TRY, TRY_TABLE => labels.put(bi.immptr().read_BlockTypeCode().toAbstractBlockType(module).1);
+				LOOP => labels.put(bi.immptr().read_BlockTypeCode().toAbstractBlockType(module).0);
+				END => labels.resize(labels.length - 1);
+				_ => ;
+			}
+			bi.next();
+		}
+		return labels[labels.length - 1 - depth];
 	}
 	// A branch on the path is deleted, but whatever it would have popped still has to be consumed, and
 	// a value its arm narrows still has to be narrowed.
@@ -116,42 +162,71 @@ class StraightLineMonitor extends Monitor {
 		def op = bi.current();
 		match (op) {
 			// labels and merge points have no meaning without branches
-			BLOCK, LOOP, ELSE, BR => return REMOVED;
+			BLOCK, LOOP, ELSE => return REMOVED;
 			// only the function's own `end`, which EXIT owns, still terminates something
 			END => {
 				if (b != exit) return REMOVED;
 				buf.end();
 				return KEPT;
 			}
+			BR => {
+				def depth = int.!(bi.immptr().read_uleb32());
+				return if(emitUnwind(f, bi.pc, depth, 0, buf), REPLACED, REMOVED);
+			}
 			// the selector is consumed on either arm
-			BR_IF, BR_TABLE, IF => {
+			IF => {
 				buf.drop();
+				return REPLACED;
+			}
+			BR_IF => {
+				buf.drop();
+				if (tookTakenArm(b, next)) emitUnwind(f, bi.pc, int.!(bi.immptr().read_uleb32()), 0, buf);
+				return REPLACED;
+			}
+			// the label at index k has its sidetable entry k + 1 entries after the table's header
+			BR_TABLE => {
+				buf.drop();
+				def labels = bi.immptr().read_labels();
+				def k = labelIndex(b, next, labels.length);
+				emitUnwind(f, bi.pc, labels[k], 4 * (k + 1), buf);
 				return REPLACED;
 			}
 			// the tested value is consumed on the null arm and continues non-null on the other
 			BR_ON_NULL => {
-				if (tookTakenArm(b, next)) buf.drop();
-				else buf.ref_as_non_null();
+				if (tookTakenArm(b, next)) {
+					buf.drop();
+					emitUnwind(f, bi.pc, int.!(bi.immptr().read_uleb32()), 0, buf);
+				} else {
+					buf.ref_as_non_null();
+				}
 				return REPLACED;
 			}
 			BR_ON_NON_NULL => {
-				if (tookTakenArm(b, next)) buf.ref_as_non_null();
-				else buf.drop();
+				if (tookTakenArm(b, next)) {
+					buf.ref_as_non_null();
+					emitUnwind(f, bi.pc, int.!(bi.immptr().read_uleb32()), 0, buf);
+				} else {
+					buf.drop();
+				}
 				return REPLACED;
 			}
 			// the value continues cast on the success arm, and on the failure arm is non-null exactly
 			// when both types admit null, since a null would have succeeded
 			BR_ON_CAST, BR_ON_CAST_FAIL => {
 				def imm = bi.immptr().read_BrOnCastImm();
-				if (tookTakenArm(b, next) == (op == Opcode.BR_ON_CAST)) {
+				def taken = tookTakenArm(b, next);
+				var emitted = true;
+				if (taken == (op == Opcode.BR_ON_CAST)) {
 					def cast = if(imm.null2(), Opcode.REF_CAST_NULL, Opcode.REF_CAST);
 					buf.put(cast.prefix);
 					buf.put_u32leb(cast.code).put_s32leb(imm.ht2);
-					return REPLACED;
+				} else if (imm.null1() && imm.null2()) {
+					buf.ref_as_non_null();
+				} else {
+					emitted = false;
 				}
-				if (!imm.null1() || !imm.null2()) return REMOVED;
-				buf.ref_as_non_null();
-				return REPLACED;
+				if (taken && emitUnwind(f, bi.pc, imm.depth, 0, buf)) emitted = true;
+				return if(emitted, REPLACED, REMOVED);
 			}
 			_ => {
 				def end = bi.nextPc();
@@ -291,6 +366,46 @@ def tookTakenArm(b: CfgBlock, next: CfgBlock) -> bool {
 	def o = b.outgoing;
 	if (o == null || o.tail == null) return false;
 	return o.tail.head.target == next;
+}
+// {outgoing} holds one edge per br_table label, in reverse label order.
+def labelIndex(b: CfgBlock, next: CfgBlock, count: int) -> int {
+	var k = count - 1;
+	for (l = b.outgoing; l != null; l = l.tail) {
+		if (l.head.target == next) return k;
+		k--;
+	}
+	return -1;
+}
+def putValueType(buf: WasmAsm, t: ValueType) {
+	match (t) {
+		I32 => buf.put(BpTypeCode.I32.code);
+		I64 => buf.put(BpTypeCode.I64.code);
+		F32 => buf.put(BpTypeCode.F32.code);
+		F64 => buf.put(BpTypeCode.F64.code);
+		V128 => buf.put(BpTypeCode.V128.code);
+		// an indexed heap type encodes its index; an abstract one encodes its negative code
+		Ref(nullable, heap) => {
+			buf.put(if(nullable, BpTypeCode.REF_NULL.code, BpTypeCode.REF.code));
+			match (heap) {
+				ANY => buf.put_s32leb(BpHeapTypeCode.ANY.val);
+				EXTERN => buf.put_s32leb(BpHeapTypeCode.EXTERN.val);
+				EQ => buf.put_s32leb(BpHeapTypeCode.EQ.val);
+				I31 => buf.put_s32leb(BpHeapTypeCode.I31.val);
+				EXN => buf.put_s32leb(BpHeapTypeCode.EXN.val);
+				NONE => buf.put_s32leb(BpHeapTypeCode.NONE.val);
+				NOFUNC => buf.put_s32leb(BpHeapTypeCode.NOFUNC.val);
+				NOCONT => buf.put_s32leb(BpHeapTypeCode.NOCONT.val);
+				NOEXTERN => buf.put_s32leb(BpHeapTypeCode.NOEXTERN.val);
+				NOEXN => buf.put_s32leb(BpHeapTypeCode.NOEXN.val);
+				Func(sig) => buf.put_s32leb(if(sig == null, BpHeapTypeCode.FUNC.val, sig.heaptype_index));
+				Struct(sdecl) => buf.put_s32leb(if(sdecl == null, BpHeapTypeCode.STRUCT.val, sdecl.heaptype_index));
+				Array(array) => buf.put_s32leb(if(array == null, BpHeapTypeCode.ARRAY.val, array.heaptype_index));
+				Cont(cont) => buf.put_s32leb(if(cont == null, BpHeapTypeCode.CONTREF.val, cont.heaptype_index));
+				FwRef(index) => buf.put_s32leb(index);
+			}
+		}
+		_ => System.error("StraightLineError", "a label value has a type with no binary encoding");
+	}
 }
 // The CFG builder faults on exception handlers, so they have to be caught before it runs.
 def hasHandlers(f: FuncDecl) -> bool {
