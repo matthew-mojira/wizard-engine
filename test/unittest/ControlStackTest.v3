@@ -10,6 +10,7 @@ def X_ = void(
 	T("br_if0", test_br_if0),
 	T("loop_backedge", test_loop_backedge),
 	T("block_extent", test_block_extent),
+	T("return_edge", test_return_edge),
 	T("unreach", test_unreach),
 	T("return", test_return),
 	T("loop0", test_loop0),
@@ -147,6 +148,18 @@ def test_block_extent(t: ControlStackTester) {
 	t.t.asserti(3, entry.start);
 	t.t.asserti(4, entry.last_instr_pc);
 	t.t.asserti(5, entry.end);
+}
+
+// a return leaves the function, so its block reaches EXIT only once the edge is added
+def test_return_edge(t: ControlStackTester) {
+	t.code([
+		u8.!(Opcode.RETURN.code)
+	]);
+	var cfg = CfgBuilder.new();
+	var t2 = cfg.build(t.func), entry = t2.0, exit = t2.1;
+	t.t.assertz(true, entry.outgoing == null);
+	cfg.addReturnEdges(t.func, entry, exit);
+	t.t.assert_eq(exit, entry.outgoing.head.target);
 }
 
 def test_unreach(t: ControlStackTester) {
