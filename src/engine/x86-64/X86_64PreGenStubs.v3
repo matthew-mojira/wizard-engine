@@ -33,6 +33,7 @@ layout X86_64PreGenHeader {
 	+56	whammReentryOffset:		i32;	// reentry point for whamm trampolines
 	+60	hostCallStubOffset:		i32;	// host call stub that calls runtime
 	+64	hostCallStubEnd:		i32;	// host call stub that calls runtime
+	+68	deoptProbedReentryOffset:	i32;	// re-enter interpreter past a probe that already fired
 	+84	codeEnd:			i32;	// end of all executable code
 	=88;
 }

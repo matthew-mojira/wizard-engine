@@ -163,6 +163,11 @@ type X86_64FrameHandle #unboxed {
 		var ic = X86_64PreGenStubs.getInterpreterCode();
 		srp().store<Pointer>(ic.start + ic.header.deoptReentryOffset);
 	}
+	// Redirect return address to the reentry point that skips the probe at the current instruction.
+	def redirectToInterpreterPastProbe() {
+		var ic = X86_64PreGenStubs.getInterpreterCode();
+		srp().store<Pointer>(ic.start + ic.header.deoptProbedReentryOffset);
+	}
 }
 
 // Factory for constructing {X86_64FrameHandle} from a stack frame pointer.

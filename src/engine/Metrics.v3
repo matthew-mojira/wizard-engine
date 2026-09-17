@@ -39,6 +39,7 @@ component Metrics {
 	def spc_dynamic_inlined_calls = m("spc:dynamic_inlined_calls", "calls", "Number of inlined call sites executed at runtime");
 	def spc_static_reconst        = m("spc:static_reconst", "sites", "Number of sites where stack frame reconstruction is emitted");
 	def spc_dynamic_reconst       = m("spc:dynamic_reconst", "sites", "Number of stack frame reconstructions executed at runtime");
+	def spc_path_functions        = m("spc:path_functions", "functions", "Number of functions compiled specialized to a path");
 	def spc_tierdowns             = m("spc:tierdowns", "guards", "Number of path guards that failed and tiered down to the interpreter");
 
 	// Metrics from executing wasm code.

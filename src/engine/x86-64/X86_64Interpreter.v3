@@ -738,6 +738,19 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		masm.emit_restore_ivar(xenv.vsp);
 		restoreDispatchTableReg();
 		genJumpToDispatch();
+
+		// Bind an entrypoint for deopt reentry that dispatches the original instruction at IP.
+		ic.header.deoptProbedReentryOffset = w.atEnd().pos;
+		restoreCallerIVars();
+		masm.emit_restore_ivar(xenv.vsp);
+		restoreDispatchTableReg();
+		var pc = r_tmp1; // = IP - CODE
+		asm.movq_r_r(pc, r_ip);
+		asm.sub_r_m(pc, m_code);
+		var origIp = r_tmp0; // FUNC_DECL.orig_bytecode + pc
+		asm.movq_r_m(origIp, r_func_decl.plus(offsets.FuncDecl_orig_bytecode));
+		asm.add_r_r(origIp, pc);
+		genDispatch0(origIp.indirect(), dispatchTables[0].1, true);
 		genDeferred();
 	}
 	def genDeferred() {

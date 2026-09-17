@@ -410,7 +410,8 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 	}
 
 	def visitProbe(orig_op: Opcode) {
-		last_probe = it.pc;
+		// an `else` after a dead arm is never executed
+		last_probe = if(orig_op != Opcode.ELSE || state.ctl_stack.peek().reachable, it.pc);
 		if (orig_op != Opcode.LOOP && orig_op != Opcode.END) emitProbe();
 	}
 	def emitProbe() {
@@ -2249,6 +2250,9 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 		masm.emit_push_X86_64Stack_rsp_r_r(regs.runtime_arg0);
 		masm.emit_mov_r_m(ValueKind.REF, regs.runtime_arg1, frame.wasm_func_slot);
 		masm.emit_mov_r_i(regs.runtime_arg2, label.create_pos);
+		// whether this code already fired a probe at the guard's instruction
+		def probed = func.cur_bytecode[label.create_pos] != func.orig_bytecode[label.create_pos];
+		masm.emit_mov_r_i(regs.runtime_arg3, if(probed, 1, 0));
 		masm.emit_call_runtime_TierDown();
 	}
 	def emitTrap(reason: TrapReason) {

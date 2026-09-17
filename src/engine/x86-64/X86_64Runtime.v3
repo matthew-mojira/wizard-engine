@@ -87,14 +87,16 @@ component X86_64Runtime {
 			}
 		}
 	}
-	// The mirror of {runtime_TIERUP}: a guard failed in code specialized to a path, so the frame
-	// becomes an interpreter frame at the guard's instruction and the call returns into the interpreter.
-	def runtime_TIERDOWN(stack: X86_64Stack, func: WasmFunction, pc: int) {
+	// The mirror of {runtime_TIERUP}: a guard failed in code specialized to a path, so the frame becomes
+	// an interpreter frame at the guard's instruction, resuming past a probe {probed} says already fired.
+	def runtime_TIERDOWN(stack: X86_64Stack, func: WasmFunction, pc: int, probed: bool) {
 		if (Debug.runtime) Trace.OUT.put2("tierdown(func=#%d, pc=%d)", func.decl.func_index, pc).ln();
 		Metrics.spc_tierdowns.val++;
 		var handle = X86_64FrameHandles.from(stack.rsp + Pointer.SIZE);
 		handle.writeInterpreterState(func.decl, pc, SidetableMap.new(func.decl)[pc]);
-		handle.redirectToInterpreter(); // overwrite return address to return to the interpreter
+		// overwrite return address to return to the interpreter
+		if (probed) handle.redirectToInterpreterPastProbe();
+		else handle.redirectToInterpreter();
 		handle.set_accessor(null);
 	}
 	def runtime_THROW(stack: X86_64Stack, instance: Instance, tag_index: u31) -> Throwable {

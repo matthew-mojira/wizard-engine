@@ -150,7 +150,12 @@ for target in $TEST_TARGETS; do
         TEST_MODE=lazy $SCRIPT_LOC/straightline/test.sh || exit_if_failure $?
         TEST_MODE=dyn $SCRIPT_LOC/straightline/test.sh || exit_if_failure $?
         TEST_MODE=spc $SCRIPT_LOC/straightline/test.sh || exit_if_failure $?
-    elif [[ "$TEST_MODE" = "jit" || "$TEST_MODE" = "lazy" || "$TEST_MODE" = "dyn" || "$TEST_MODE" = "spc" ]]; then
+        TEST_MODE=dyn-path SL_FLAGS=--tierup-threshold=30 $SCRIPT_LOC/straightline/test.sh || exit_if_failure $?
+        # several instances share each function's compiled code
+        TEST_MODE=jit SL_FLAGS=--repeat=3 SL_NO_COUNTS=1 $SCRIPT_LOC/straightline/test.sh || exit_if_failure $?
+        # a monitor's probes fire the same number of times whether or not a guard fails
+        TEST_MODE=jit SL_FLAGS=--monitors=hotness SL_NO_COUNTS=1 $SCRIPT_LOC/straightline/test.sh || exit_if_failure $?
+    elif [[ "$TEST_MODE" = "jit" || "$TEST_MODE" = "lazy" || "$TEST_MODE" = "dyn" || "$TEST_MODE" = "spc" || "$TEST_MODE" = "dyn-path" ]]; then
         $SCRIPT_LOC/straightline/test.sh || exit_if_failure $?
     else
         skip straightline "requires JIT mode"

@@ -1,0 +1,84 @@
+// Copyright 2026 Wizard authors. All rights reserved.
+// See LICENSE for details of Apache 2.0 license.
+
+// The paths that functions are to be specialized to, as given on the command line, and their
+// resolution into the form the compiler consumes.
+component SpcPaths {
+	// Parses "<func>@<pc>:<pc>:...[,<func>@...]", where each pc is the start of a block on the path.
+	def parse(s: string) -> List<(int, Array<int>)> {
+		var result: List<(int, Array<int>)>;
+		for (spec in Strings.split(s, ",", -1)) {
+			def parts = Strings.split(spec, "@", -1);
+			if (parts.length != 2) return null;
+			def func = parseInts(parts[0], ":"), pcs = parseInts(parts[1], ":");
+			if (func == null || func.length != 1 || pcs == null) return null;
+			result = List.new((func[0], pcs), result);
+		}
+		return result;
+	}
+	private def parseInts(s: string, sep: string) -> Array<int> {
+		def parts = Strings.split(s, sep, -1), vals = Array<int>.new(parts.length);
+		for (i < parts.length) {
+			def t = Ints.parsePosDecimal(parts[i], 0);
+			if (t.0 == 0 || t.0 != parts[i].length) return null;
+			vals[i] = int.!(t.1);
+		}
+		return vals;
+	}
+	// The arm taken at each decision on the path through {f} whose blocks start at {pcs}, indexed by
+	// the branch's pc and -1 everywhere else: the label index at a br_table, otherwise 1 for the
+	// taken arm and 0 for the fallthrough. Reports through {err} and returns null for a sequence
+	// that is not one acyclic route from entry to exit.
+	def resolve(f: FuncDecl, pcs: Array<int>, err: ErrorGen) -> Array<int> {
+		def bi = BytecodeIterator.new();
+		for (it = bi.reset(f); it.more(); it.next()) {
+			match (it.current()) {
+				TRY, TRY_TABLE => return fail(err, it.pc, "try at +%d, which the CFG builder cannot handle");
+				_ => ;
+			}
+		}
+		def cfg = CfgBuilder.new(), built = cfg.build(f), exit = built.1;
+		var entry = built.0;
+		cfg.addReturnEdges(f, entry, exit);
+		cfg.removeEmptyBlocks(entry, exit);
+		// a function that starts with `loop` leaves the first block owning no instruction, since
+		// that opcode belongs to the loop header, so the path starts at the block after it
+		while (entry.last_instr_pc < 0 && entry.outgoing != null && entry.outgoing.tail == null) entry = entry.outgoing.head.target;
+		def blocks = Vector<CfgBlock>.new();
+		entry.dfs(blocks.put, null, null);
+
+		def path = Array<CfgBlock>.new(pcs.length);
+		for (i < pcs.length) {
+			for (j < blocks.length) if (blocks[j].start == pcs[i]) path[i] = blocks[j];
+			if (path[i] == null) return fail(err, pcs[i], "no block starts at +%d");
+		}
+		if (path[0] != entry) return fail(err, pcs[0], "path starts at +%d, which is not the entry block");
+		if (path[path.length - 1] != exit) return fail(err, pcs[pcs.length - 1], "path ends at +%d, which is not the exit block");
+
+		def arms = Array<int>.new(f.orig_bytecode.length);
+		for (i < arms.length) arms[i] = -1;
+		for (i < path.length - 1) {
+			def b = path[i], next = path[i + 1], out = b.outgoing;
+			var e: CfgEdge;
+			for (l = out; l != null; l = l.tail) if (l.head.target == next) e = l.head;
+			if (e == null) return fail(err, pcs[i], "no edge leaves the block at +%d for the next one on the path");
+			if (e.isBackedge) return fail(err, pcs[i], "the edge out of +%d is a backedge, so the path is not acyclic");
+			if (out.tail == null) continue; // not a decision
+			bi.at(b.last_instr_pc, -1);
+			if (bi.current() == Opcode.BR_TABLE) {
+				// {outgoing} holds one edge per label, in reverse label order
+				var k = Lists.length(out) - 1;
+				for (l = out; l.head.target != next; l = l.tail) k--;
+				arms[b.last_instr_pc] = k;
+			} else {
+				// {outgoing} is [fallthrough, taken] for a two-way branch
+				arms[b.last_instr_pc] = if(out.tail.head.target == next, 1, 0);
+			}
+		}
+		return arms;
+	}
+	private def fail(err: ErrorGen, pc: int, fmt: string) -> Array<int> {
+		err.abs(u64.!(pc)).set(Strings.format1(fmt, pc));
+		return null;
+	}
+}

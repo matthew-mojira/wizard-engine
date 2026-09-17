@@ -1,0 +1,370 @@
+// Copyright 2026 Wizard authors. All rights reserved.
+// See LICENSE for details of Apache 2.0 license.
+
+// A Ball-Larus path profile of one function, gathered by probes while the function runs in the
+// interpreter, which tells the compiler the path to specialize to when the function tiers up.
+// Section and figure numbers refer to "Efficient Path Profiling" (Ball and Larus, MICRO 1996).
+class SpcPathProfile(module: Module, func: FuncDecl) {
+	def MAX_PATHS = 1 << 16; // more paths than this are not worth a counter each
+	var counts: Array<int>;  // executions of each path, or null if the function is not profiled
+	private var entry: ProfBlock;
+	private var exit: ProfBlock;
+	private def blocks = Vector<ProfBlock>.new();
+	private def tree = Vector<ProfEdge>.new(); // the spanning tree's edges
+	private def probes = Vector<(int, Probe)>.new();
+
+	new() {
+		// the CFG builder faults on exception handlers, and a frame that is suspended does not
+		// keep its frame variables once compiled code is involved
+		for (bi = BytecodeIterator.new().reset(func); bi.more(); bi.next()) {
+			match (bi.current()) {
+				TRY, TRY_TABLE => return;
+				CONT_NEW, CONT_BIND, SUSPEND, RESUME, RESUME_THROW, RESUME_THROW_REF, SWITCH => return;
+				_ => ;
+			}
+		}
+		def cfg = CfgBuilder.new();
+		cfg.newBlock = ProfBlock.new;
+		cfg.newEdge = ProfEdge.new;
+		def built = cfg.build(func);
+		exit = ProfBlock.!(built.1);
+		cfg.addReturnEdges(func, built.0, exit);
+		cfg.removeEmptyBlocks(built.0, exit);
+		// a function that starts with `loop` leaves the first block owning no instruction
+		var b = built.0;
+		while (b.last_instr_pc < 0 && b.outgoing != null && b.outgoing.tail == null) {
+			def e = b.outgoing.head;
+			var keep: List<CfgEdge>;
+			for (l = e.target.incoming; l != null; l = l.tail) if (l.head != e) keep = List.new(l.head, keep);
+			e.target.incoming = keep;
+			b = e.target;
+		}
+		entry = ProfBlock.!(b);
+		entry.dfs(addBlock, null, null);
+
+		addDummies(cfg);
+		if (!assignVals()) return;
+		def chords = kruskals();
+		computeIncrements(chords);
+		placeActions(chords);
+		indexArms();
+		counts = Array.new(entry.numPaths);
+		placeProbes();
+	}
+	private def addBlock(b: CfgBlock) {
+		blocks.put(ProfBlock.!(b));
+	}
+	// Stops profiling, so that neither the interpreter nor compiled code pays for it again.
+	def remove() {
+		for (i < probes.length) Instrumentation.removeLocalProbe(module, func.func_index, probes[i].0, probes[i].1);
+		probes.resize(0);
+	}
+	// The arm taken at each decision of the most frequent path, indexed by the branch's pc and -1
+	// everywhere else, or null if no whole acyclic path through the function has run yet.
+	def hottest() -> Array<int> {
+		if (counts == null) return null;
+		var best = 0;
+		for (i < counts.length) if (counts[i] > counts[best]) best = i;
+		if (Trace.compiler) {
+			Trace.OUT.put2("func[%d] path profile, %d paths:", func.func_index, counts.length);
+			for (i < counts.length) if (counts[i] > 0) Trace.OUT.put2(" [%d]=%d", i, counts[i]);
+			Trace.OUT.ln();
+		}
+		if (counts[best] == 0) return null;
+		def arms = Array<int>.new(func.orig_bytecode.length);
+		for (i < arms.length) arms[i] = -1;
+		// (Section 3.2) regenerate the path from its number: at each vertex, the edge whose range
+		// of path sums holds what remains
+		var v = entry, k = best;
+		while (v != exit) {
+			var pick: ProfEdge;
+			for (l = v.outgoing; l != null; l = l.tail) {
+				def e = ProfEdge.!(l.head);
+				if (!e.isBackedge && e.val <= k && k < e.val + ProfBlock.!(e.target).numPaths) pick = e;
+			}
+			// a dummy edge means the path is a piece of a loop, not a route through the function
+			if (pick == null || pick.isDummy) return null;
+			if (v.numArms > 1) arms[v.last_instr_pc] = pick.arm;
+			k -= pick.val;
+			v = ProfBlock.!(pick.target);
+		}
+		return arms;
+	}
+
+	// (Section 4) a dummy ENTRY->v for each backedge target and a dummy w->EXIT for each source,
+	// which stand in for the backedge and make the graph acyclic
+	private def addDummies(cfg: CfgBuilder) {
+		for (i < blocks.length) {
+			def b = blocks[i];
+			for (l = b.incoming; l != null; l = l.tail) {
+				def e = l.head;
+				if (e.isBackedge && e.source != b && b != entry) {
+					b.entryDummy = ProfEdge.!(cfg.link(-1, entry, b));
+					b.entryDummy.isDummy = true;
+					break;
+				}
+			}
+			for (l = b.outgoing; l != null; l = l.tail) {
+				def e = l.head;
+				if (e.isBackedge && e.target != b && b != exit) {
+					b.exitDummy = ProfEdge.!(cfg.link(-1, b, exit));
+					b.exitDummy.isDummy = true;
+					break;
+				}
+			}
+		}
+	}
+	// (Figure 5) Val(e) for each edge, so that no two paths have the same sum; false if there are
+	// too many paths to count
+	private def assignVals() -> bool {
+		def order = Vector<ProfBlock>.new();
+		postorder(entry, order);
+		for (i < order.length) order[i].mark = 0;
+		for (i < order.length) {
+			def v = order[i];
+			if (v == exit) {
+				v.numPaths = 1;
+				continue;
+			}
+			for (l = v.outgoing; l != null; l = l.tail) {
+				if (l.head.isBackedge) continue;
+				ProfEdge.!(l.head).val = v.numPaths;
+				v.numPaths += ProfBlock.!(l.head.target).numPaths;
+				if (v.numPaths > MAX_PATHS) return false;
+			}
+		}
+		return entry.numPaths > 0;
+	}
+	// Reverse topological order of the graph without its backedges. A walk that followed them
+	// could reach a loop header from inside the loop and finish it before the blocks ahead of it.
+	private def postorder(v: ProfBlock, order: Vector<ProfBlock>) {
+		if (v.mark != 0) return;
+		v.mark = 1;
+		for (l = v.outgoing; l != null; l = l.tail) {
+			if (!l.head.isBackedge) postorder(ProfBlock.!(l.head.target), order);
+		}
+		order.put(v);
+	}
+	// (Section 3.3) a spanning tree by Kruskal's algorithm, seeded with EXIT->ENTRY; returns the
+	// chords left over, which are the edges to instrument
+	private def kruskals() -> Vector<ProfEdge> {
+		def chords = Vector<ProfEdge>.new();
+		if (exit != entry) exit.parent = entry;
+		tree.put(ProfEdge.new(-1, exit, entry));
+		for (i < blocks.length) {
+			for (l = blocks[i].outgoing; l != null; l = l.tail) {
+				def e = ProfEdge.!(l.head);
+				if (e.isBackedge) continue;
+				def u = ProfBlock.!(e.source).findSet(), v = ProfBlock.!(e.target).findSet();
+				if (u == v) {
+					e.isChord = true;
+					chords.put(e);
+				} else {
+					v.parent = u;
+					tree.put(e);
+				}
+			}
+		}
+		return chords;
+	}
+	// (Figure 4) Increment(e) for each chord, by a walk of the spanning tree
+	private def computeIncrements(chords: Vector<ProfEdge>) {
+		walk(0, entry, null, chords);
+		for (i < chords.length) chords[i].increment += chords[i].val;
+	}
+	private def walk(events: int, v: CfgBlock, e: ProfEdge, chords: Vector<ProfEdge>) {
+		for (i < tree.length) {
+			def f = tree[i];
+			if (f != e && v == f.target) walk(dir(e, f) * events + f.val, f.source, f, chords);
+		}
+		for (i < tree.length) {
+			def f = tree[i];
+			if (f != e && v == f.source) walk(dir(e, f) * events + f.val, f.target, f, chords);
+		}
+		for (i < chords.length) {
+			def f = chords[i];
+			if (v == f.source || v == f.target) f.increment += dir(e, f) * events;
+		}
+	}
+	// 1 if {e} and {f}, which share an endpoint, point the same way along the walk, else -1
+	private def dir(e: ProfEdge, f: ProfEdge) -> int {
+		if (e == null) return 1;
+		return if(e.source == f.target || e.target == f.source, 1, -1);
+	}
+	// (Figure 8) the register initializations, the count increments, and the register increments,
+	// then (Section 4) each backedge, which counts a path and starts the next
+	private def placeActions(chords: Vector<ProfEdge>) {
+		def fromEntry = Vector<CfgBlock>.new(), fromExit = Vector<CfgBlock>.new();
+		fromEntry.put(entry);
+		Vectors.drain(fromEntry, 0, fun (v: CfgBlock) {
+			for (l = v.outgoing; l != null; l = l.tail) {
+				def e = ProfEdge.!(l.head);
+				if (e.isBackedge || e.isDummy) continue;
+				if (e.isChord) e.action = ProfAction.RSet(e.increment);
+				else if (e.target.incoming.tail == null) fromEntry.put(e.target);
+				else e.action = ProfAction.RSet(0);
+			}
+		});
+		fromExit.put(exit);
+		Vectors.drain(fromExit, 0, fun (w: CfgBlock) {
+			for (l = w.incoming; l != null; l = l.tail) {
+				def e = ProfEdge.!(l.head);
+				if (e.isBackedge || e.isDummy) continue;
+				if (e.isChord) {
+					if (ProfAction.RSet.?(e.action)) e.action = ProfAction.CountConst(e.increment);
+					else e.action = ProfAction.CountRPlus(e.increment);
+				} else if (e.source.outgoing.tail == null) {
+					fromExit.put(e.source);
+				} else {
+					e.action = ProfAction.CountRPlus(0);
+				}
+			}
+		});
+		for (i < chords.length) {
+			def e = chords[i];
+			if (!e.isDummy && ProfAction.Nothing.?(e.action)) e.action = ProfAction.RAdd(e.increment);
+		}
+		for (i < blocks.length) {
+			for (l = blocks[i].outgoing; l != null; l = l.tail) {
+				def e = ProfEdge.!(l.head);
+				// (Section 4.1) a self-loop repeats a vertex without changing the path
+				if (!e.isBackedge || e.source == e.target) continue;
+				def ex = ProfBlock.!(e.source).exitDummy, en = ProfBlock.!(e.target).entryDummy;
+				e.action = ProfAction.CountReset(if(ex != null, ex.increment), if(en != null, en.increment));
+			}
+		}
+	}
+	// Numbers the arms of each decision the way the compiler does: the label index at a br_table,
+	// otherwise 1 for the taken arm and 0 for the fallthrough.
+	private def indexArms() {
+		def bi = BytecodeIterator.new().reset(func);
+		for (i < blocks.length) {
+			def b = blocks[i];
+			// dummy edges are linked last, so they are first in {outgoing}
+			var real = b.outgoing;
+			while (real != null && ProfEdge.!(real.head).isDummy) real = real.tail;
+			b.real = real;
+			b.numArms = Lists.length(real);
+			if (b.numArms < 2) continue;
+			bi.at(b.last_instr_pc, -1);
+			def table = bi.current() == Opcode.BR_TABLE;
+			// {outgoing} is in reverse label order, and [fallthrough, taken] for a two-way branch
+			var k = if(table, b.numArms - 1, 0);
+			for (l = real; l != null; l = l.tail) {
+				ProfEdge.!(l.head).arm = k;
+				k += if(table, -1, 1);
+			}
+		}
+	}
+	// One probe for each block with an instrumented edge, at the block's last instruction.
+	private def placeProbes() {
+		def rvar = if(func.frame_var_tags != null, func.frame_var_tags.length);
+		def tag = [BpTypeCode.I32.code];
+		func.frame_var_tags = if(func.frame_var_tags == null, tag, Arrays.concat(func.frame_var_tags, tag));
+		def bi = BytecodeIterator.new().reset(func);
+		for (i < blocks.length) {
+			def b = blocks[i];
+			if (b.numArms == 0) continue;
+			def edges = Array<ProfEdge>.new(b.numArms);
+			var any = false;
+			for (l = b.real; l != null; l = l.tail) {
+				def e = ProfEdge.!(l.head);
+				edges[e.arm] = e;
+				if (!ProfAction.Nothing.?(e.action)) any = true;
+			}
+			if (!any) continue;
+			var select: (FrameAccessor, Value) -> int;
+			if (b.numArms > 1) {
+				bi.at(b.last_instr_pc, -1);
+				match (bi.current()) {
+					BR_TABLE => select = selectTable(edges.length, _, _);
+					BR_ON_NULL => select = selectNull(true, _, _);
+					BR_ON_NON_NULL => select = selectNull(false, _, _);
+					BR_ON_CAST => select = selectCast(bi.immptr().read_BrOnCastImm(), true, _, _);
+					BR_ON_CAST_FAIL => select = selectCast(bi.immptr().read_BrOnCastImm(), false, _, _);
+					_ => select = selectIf;
+				}
+			}
+			def p = SpcPathProbe.new(rvar, edges, counts, select);
+			probes.put(b.last_instr_pc, p);
+			Instrumentation.insertLocalProbe(module, func.func_index, b.last_instr_pc, p);
+		}
+	}
+}
+
+// The arm a decision is about to take, read from its operand {v} before it executes.
+def selectIf(accessor: FrameAccessor, v: Value) -> int {
+	return if(Values.unbox_u(v) != 0, 1, 0);
+}
+def selectTable(arms: int, accessor: FrameAccessor, v: Value) -> int {
+	def u = Values.unbox_u(v);
+	return if(u >= u32.!(arms), arms - 1, int.!(u));
+}
+def selectNull(nullTaken: bool, accessor: FrameAccessor, v: Value) -> int {
+	return if(Values.isNull(v) == nullTaken, 1, 0);
+}
+def selectCast(imm: BrOnCastImm, successTaken: bool, accessor: FrameAccessor, v: Value) -> int {
+	return if(Runtime.cast(accessor.func().instance, imm.null2(), imm.ht2, v) == successTaken, 1, 0);
+}
+
+// Runs the action of whichever edge the block's last instruction is about to take. {r}, the path
+// sum so far, lives in the frame variable {rvar}, so every activation has its own.
+class SpcPathProbe(rvar: int, edges: Array<ProfEdge>, counts: Array<int>,
+		select: (FrameAccessor, Value) -> int) extends Probe {
+	def fire(loc: DynamicLoc) -> ProbeAction {
+		def accessor = loc.frame.getFrameAccessor();
+		def e = edges[if(select == null, 0, select(accessor, accessor.getOperand(0)))];
+		match (e.action) {
+			Nothing => ;
+			RSet(value) => setR(accessor, value);
+			RAdd(value) => setR(accessor, getR(accessor) + value);
+			CountConst(value) => counts[value]++;
+			CountRPlus(value) => counts[getR(accessor) + value]++;
+			CountReset(add, set) => {
+				counts[getR(accessor) + add]++;
+				setR(accessor, set);
+			}
+		}
+		return ProbeAction.Continue;
+	}
+	private def getR(accessor: FrameAccessor) -> int {
+		return Values.unbox_i(accessor.getFrameVar(rvar));
+	}
+	private def setR(accessor: FrameAccessor, v: int) {
+		accessor.getWriter().setFrameVar(rvar, Values.box_i(v));
+	}
+}
+
+// What an edge does to the path register {r} and the path counts when it is taken.
+type ProfAction {
+	case Nothing;
+	case RSet(value: int);               // r = value
+	case RAdd(value: int);               // r += value
+	case CountConst(value: int);         // counts[value]++
+	case CountRPlus(value: int);         // counts[r + value]++
+	case CountReset(add: int, set: int); // counts[r + add]++; r = set
+}
+
+class ProfBlock extends CfgBlock {
+	var numPaths: int;        // NumPaths(v): paths from here to EXIT
+	var entryDummy: ProfEdge; // ENTRY->this, if this is a backedge target
+	var exitDummy: ProfEdge;  // this->EXIT, if this is a backedge source
+	var real: List<CfgEdge>;  // {outgoing} without the dummy edges
+	var numArms: int;         // length of {real}
+	var parent: ProfBlock;    // the spanning tree's disjoint-set forest; null at a root
+
+	new(pc: int) super(pc) { }
+	def findSet() -> ProfBlock {
+		return if(parent == null, this, parent.findSet());
+	}
+}
+class ProfEdge extends CfgEdge {
+	var val: int;       // Val(e)
+	var increment: int; // Increment(e), for a chord
+	var isChord: bool;  // not in the spanning tree
+	var isDummy: bool;  // stands in for a backedge; has no instruction
+	var arm: int;       // which arm of its block's decision this edge is
+	var action: ProfAction;
+
+	new(pc: int, source: CfgBlock, target: CfgBlock) super(pc, source, target) { }
+}

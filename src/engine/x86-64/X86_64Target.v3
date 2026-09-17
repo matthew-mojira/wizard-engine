@@ -28,6 +28,7 @@ component Target {
 			ExecuteOptions.registerMode("jit", X86_64SpcAotStrategy.new(true), "pre-compile modules with SPC, fallback to interpreter");
 			ExecuteOptions.registerMode("lazy", X86_64SpcLazyStrategy.new(), "lazy-compile functions with SPC on first execution");
 			ExecuteOptions.registerMode("dyn", X86_64DynamicStrategy.new(), "use fast interpreter first, compile hot functions with SPC");
+			ExecuteOptions.registerMode("dyn-path", X86_64PathStrategy.new(), "like dyn, but compile each hot function specialized to its most frequent path");
 		}
 		ExecuteOptions.registerDefaultMode("int", X86_64InterpreterOnlyStrategy.new(),
 			"use fast interpreter only");
@@ -247,6 +248,11 @@ class X86_64SpcStrategy extends X86_64ExecutionStrategy {
 	def lazyCompile(wf: WasmFunction) -> SpcResultForStub {
 		return compileFunction(wf, "lazy");
 	}
+	// Called as {func} is about to be compiled. Returns the path to specialize it to, as the arm
+	// taken at each decision, or null for none.
+	def onCompile(module: Module, func: FuncDecl) -> Array<int> {
+		return null;
+	}
 	private def compileFunction(wf: WasmFunction, how: string) -> SpcResultForStub {
 		// Check the JIT filter, if there is one
 		if (!applyJitFilter(wf.instance.module, wf.decl, how)) return SpcResultForStub(wf, X86_64Spc.setInterpreterFallback(wf.decl), null);
@@ -263,7 +269,7 @@ class X86_64SpcStrategy extends X86_64ExecutionStrategy {
 		var masm = X86_64MacroAssembler.!(compiler.masm), w = masm.asm.w;
 
 		// generate code for the function
-		var success = genFunc(compiler, module, wf.decl, null);
+		var success = genFunc(compiler, module, wf.decl, onCompile(module, wf.decl), null);
 
 		// Check for remaining code space
 		var regionSize = code.mapping.range.size();
@@ -346,7 +352,7 @@ class X86_64SpcAotStrategy(interpreter_fallback: bool) extends X86_64SpcStrategy
 			var f = module.functions[i];
 			if (f.imported()) continue;
 			var start = w.atEnd().pos;
-			var compiled = applyJitFilter(module, f, "aot") && genFunc(compiler, module, f, suberr);
+			var compiled = applyJitFilter(module, f, "aot") && genFunc(compiler, module, f, null, suberr);
 			if (compiled) bounds[i] = (start, w.end());
 			else bounds[i] = (-1, -1);
 		}
@@ -435,6 +441,7 @@ class X86_64DynamicStrategy extends X86_64SpcStrategy {
 			wf.decl.tierup_trigger = int.max; // no point in trying for a while
 			return TargetOsrInfo(Pointer.NULL, null);
 		}
+		onCompile(module, wf.decl); // code entered at a loop is not specialized to a path
 		var label = compiler.genOsr(module, wf.decl, pc, null);
 		var code = module.target_module.spc_code;
 		var masm = X86_64MacroAssembler.!(compiler.masm);
@@ -458,6 +465,33 @@ class X86_64DynamicStrategy extends X86_64SpcStrategy {
 		return TargetOsrInfo(entrypoint, List.new((pc, offset), null));
 	}
 }
+// The dynamic strategy, plus path specialization: each function's paths are profiled while it is
+// interpreted, and it is compiled specialized to whichever path ran most. Compiled code is never
+// profiled, since the probes come out as the function tiers up.
+class X86_64PathStrategy extends X86_64DynamicStrategy {
+	def profiles = HashMap<FuncDecl, SpcPathProfile>.new(FuncDecl.func_index, FuncDecl.==);
+
+	def onModuleFinish(module: Module, size: u32, err: ErrorGen) {
+		for (i < module.functions.length) {
+			var f = module.functions[i];
+			if (!f.imported()) profiles[f] = SpcPathProfile.new(module, f);
+		}
+		// after the probes, since inserting one asks for the function to be compiled on its next call
+		installStubForModule(module, X86_64Spc.setTierUpFor);
+		disableLazyNameDecodingDuringGC(module);
+	}
+	// monitors insert their probes later, for the same reason
+	def onMonitorsFinish(module: Module, err: ErrorGen) {
+		installStubForModule(module, X86_64Spc.setTierUpFor);
+	}
+	def onCompile(module: Module, func: FuncDecl) -> Array<int> {
+		var profile = profiles[func];
+		if (profile == null) return null;
+		var arms = profile.hottest();
+		profile.remove();
+		return arms;
+	}
+}
 
 def newCompiler(filename: string) -> X86_64SinglePassCompiler {
 	var extensions = Extension.set.all; // TODO: all extensions enabled for compilation
@@ -479,15 +513,18 @@ def allocateCodeForModule(module: Module, codeSize: int) {
 		module.filename, (mapping.range.start - Pointer.NULL), (mapping.range.end - Pointer.NULL)).ln();
 }
 
-// Compiles {func}, specialized to its path if the straightline option names it.
-def genFunc(compiler: X86_64SinglePassCompiler, module: Module, func: FuncDecl, err: ErrorGen) -> bool {
+// Compiles {func}, specialized to the path the straightline option names for it, or else to the
+// path that takes {arms}, if any.
+def genFunc(compiler: X86_64SinglePassCompiler, module: Module, func: FuncDecl, arms: Array<int>, err: ErrorGen) -> bool {
 	for (l = CompilerOptions.STRAIGHTLINE.get(); l != null; l = l.tail) {
 		if (l.head.0 != func.func_index) continue;
-		var perr = ErrorGen.new(module.filename), arms = SpcPaths.resolve(func, l.head.1, perr);
-		if (arms != null) return compiler.genPath(module, func, arms, err);
-		Trace.OUT.put2("func[%d] not specialized to its path: %s", func.func_index, perr.error_msg).ln();
+		var perr = ErrorGen.new(module.filename);
+		arms = SpcPaths.resolve(func, l.head.1, perr);
+		if (arms == null) Trace.OUT.put2("func[%d] not specialized to its path: %s", func.func_index, perr.error_msg).ln();
 	}
-	return compiler.gen(module, func, err);
+	if (arms == null) return compiler.gen(module, func, err);
+	Metrics.spc_path_functions.val++;
+	return compiler.genPath(module, func, arms, err);
 }
 def applyJitFilter(module: Module, func: FuncDecl, how: string) -> bool {
 	var filter = CompilerOptions.JIT_FILTER.get();
