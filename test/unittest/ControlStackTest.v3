@@ -127,7 +127,7 @@ def test_loop_backedge(t: ControlStackTester) {
 		u8.!(Opcode.BR_IF.code), 0,
 		u8.!(Opcode.END.code)
 	]);
-	var entry = CfgBuilder.new().build(t.func);
+	var entry = CfgBuilder.new().build(t.func).0;
 	var header = entry.outgoing.head;
 	t.t.assertz(false, header.isBackedge);
 	var back = 0;
@@ -143,7 +143,7 @@ def test_block_extent(t: ControlStackTester) {
 		u8.!(Opcode.NOP.code),
 		u8.!(Opcode.NOP.code)
 	]);
-	var entry = CfgBuilder.new().build(t.func);
+	var entry = CfgBuilder.new().build(t.func).0;
 	t.t.asserti(3, entry.start);
 	t.t.asserti(4, entry.last_instr_pc);
 	t.t.asserti(5, entry.end);

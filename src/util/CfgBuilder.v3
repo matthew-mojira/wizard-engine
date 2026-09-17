@@ -13,8 +13,9 @@ class CfgBuilder {
 		ctl_stack.bindLabel = bindCfgBlock;
 	}
 
-	def build(func: FuncDecl) -> CfgBlock {
+	def build(func: FuncDecl) -> (CfgBlock, CfgBlock) {
 		var start = ctl_stack.reset();
+		var exit = ctl_stack.getEntry(0).label;
 		bi.reset(func);
 		bi.dispatchLocalDecls(ctl_stack); // advance bi.pc past locals before ctl_stack.pc is read
 		while (bi.more()) {
@@ -31,7 +32,7 @@ class CfgBuilder {
 			}
 			bi.next();
 		}
-		return start;
+		return (start, exit);
 	}
 	// prepends, so {outgoing} is in reverse branch-label order
 	private def link(pc: int, from: CfgBlock, to: CfgBlock) -> CfgEdge {
