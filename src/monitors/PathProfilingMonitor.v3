@@ -64,7 +64,7 @@ class PathProfilingMonitor extends Monitor {
 		for (j < entries.length) {
 			def e = entries[j];
 			out.put1("func %q", e.func.render(e.module.names, _)).ln();
-			printCfg(out, e.cfg, e.st);
+			printCfg(out, e.cfg);
 			// the block sequence each path number denotes, so counts[k] can be read back to a route
 			def paths = enumPaths(e.cfg, e.exit, e.numPaths);
 			// each call site lists only the paths its calls took
@@ -151,9 +151,7 @@ private class PathEdge extends CfgEdge {
 	var isDummy: bool; // added by Section 4 step 1; carries a Val but no instruction
 	def weight: int = 1; // Kruskal's maximizes total tree weight, to MINIMIZE total chord cost
 	var increment: int;  // Increment(e), for chords only (Section 3.3)
-	// classification + position within SpanningTree.chords/tree, assigned by kruskals
-	var isChord: bool;
-	var index: int;
+	var isChord: bool; // in E - T rather than T, assigned by kruskals
 	// instrumentation for this edge
 	var action: Action;
 	// (Section 4.1) runtime trip count, for a self-loop only
@@ -253,8 +251,7 @@ private class SpanningTree(tree: Array<PathEdge>, chords: Array<PathEdge>, backe
 	// Algorithm for determining Increment(e) for each chord e using a DFS of spanning tree T of
 	// graph G, Fig. 4 (increment loop, DFS, and Dir below are all part of this same algorithm).
 	def computeIncrements(entry: CfgBlock) {
-		// for each e in E - T do Increment(e) := 0
-		for (j < chords.length) chords[j].increment = 0;
+		// for each e in E - T do Increment(e) := 0, which is a new edge's default
 		// DFS(0, ENTRY, NULL)
 		dfs(0, entry, null);
 		// for each e in E - T: 
@@ -353,10 +350,7 @@ def kruskals(entry: CfgBlock, exit: CfgBlock) -> SpanningTree {
 
 	// Seed T with EXIT->ENTRY so it never becomes a chord. Detached from both edge lists, since it
 	// belongs to the spanning tree rather than the CFG.
-	def exitPathEdge = PathEdge.new(-1, exit, entry);
-	exitPathEdge.isChord = false;
-	exitPathEdge.index = tree.length;
-	tree.put(exitPathEdge);
+	tree.put(PathEdge.new(-1, exit, entry));
 	// UNION(FIND-SET(EXIT), FIND-SET(ENTRY))
 	def setExit = disjointSet[exit];
 	setExit.add(entry);
@@ -370,15 +364,12 @@ def kruskals(entry: CfgBlock, exit: CfgBlock) -> SpanningTree {
 		// if FIND-SET(u) != FIND-SET(v)
 		if (findSetU == findSetV) {
 			te.isChord = true;
-			te.index = chords.length;
 			chords.put(te);
 		} else {
 			// UNION(FIND-SET(u), FIND-SET(v))
 			findSetU.adds(findSetV);
 			for (v in findSetV.toArray()) disjointSet[v] = findSetU;
 			// F := F ∪ { {u, v} }
-			te.isChord = false;
-			te.index = tree.length;
 			tree.put(te);
 		}
 	}
@@ -648,19 +639,12 @@ def walkPath(v: CfgBlock, exit: CfgBlock, sum: int, acc: List<int>, out: Array<L
 }
 
 // CFG + val(e) printing
-def printCfg(out: TraceBuilder, entry: CfgBlock, st: SpanningTree) {
-	def touched = Vector<CfgBlock>.new();
-	printCfgRec(out, entry, st, touched);
-	for (i < touched.length) touched[i].mark = 0;
+def printCfg(out: TraceBuilder, entry: CfgBlock) {
+	entry.dfs(printBlock(out, _), null, null);
 }
-def printCfgRec(out: TraceBuilder, b: CfgBlock, st: SpanningTree, touched: Vector<CfgBlock>) {
-	if (b == null || b.mark != 0) return;
-	b.mark = 1;
-	touched.put(b);
+def printBlock(out: TraceBuilder, b: CfgBlock) {
 	// the range of bytes this block owns; its outgoing edges are probed at {last_instr_pc}
 	out.put3("  block %d +%d ... %d", b.id, b.start, b.end).ln();
-	// print all of this block's own edges first, so they aren't interleaved
-	// with a deeper block's edges once we recurse
 	Lists.apply(b.outgoing, fun (c: CfgEdge) {
 		def e = PathEdge.!(c);
 		// Increment(e) is defined for chords only; a tree edge carries none
@@ -675,5 +659,4 @@ def printCfgRec(out: TraceBuilder, b: CfgBlock, st: SpanningTree, touched: Vecto
 		if (e.isBackedge) out.puts(" BACKEDGE");
 		out.ln();
 	});
-	Lists.apply(b.outgoing, fun (e: CfgEdge) { printCfgRec(out, e.target, st, touched); });
 }

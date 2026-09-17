@@ -16,7 +16,7 @@ class StraightLineMonitor extends Monitor {
 	def calls = Vector<Array<Value>>.new();
 	var module: Module;
 	var orig: FuncDecl;
-	var code: Array<byte>;
+	var copy: FuncDecl; // the straight-lined copy, once it has validated
 	var probe: ArgProbe;
 	var actions: Array<byte>; // what became of the instruction at each pc
 	def scratch = Vector<ValueType>.new(); // types of the locals appended to the copy's declarations
@@ -42,16 +42,19 @@ class StraightLineMonitor extends Monitor {
 		orig = f;
 		def path = resolvePath(f, pcs, err);
 		if (path == null) return;
-		code = emit(f, path);
+		copy = declare(emit(f, path), err);
+		if (copy == null) return;
 		probe = ArgProbe.new(f, calls);
 		Instrumentation.insertFuncEntryProbe(m, f.func_index, probe);
 	}
 	// Maps each start pc onto its block and checks that the sequence is one acyclic route from
 	// ENTRY to EXIT, reporting through {err} and returning null for any sequence that is not.
 	def resolvePath(f: FuncDecl, pcs: Array<int>, err: ErrorGen) -> Array<CfgBlock> {
-		if (hasHandlers(f)) {
-			err.abs(0).set("function contains try/try_table, which the CFG builder cannot handle");
-			return null;
+		for (bi = BytecodeIterator.new().reset(f); bi.more(); bi.next()) {
+			match (bi.current()) {
+				TRY, TRY_TABLE => return fail(err, bi.pc, "try at +%d, which the CFG builder cannot handle");
+				_ => ;
+			}
 		}
 		def built = cfgBuilder.build(f);
 		def entry = built.0, exit = built.1;
@@ -62,31 +65,16 @@ class StraightLineMonitor extends Monitor {
 
 		def path = Array<CfgBlock>.new(pcs.length);
 		for (i < pcs.length) {
-			def b = findByStart(blocks, pcs[i]);
-			if (b == null) {
-				return fail(err, pcs[i], "no block starts at +%d");
-			}
-			path[i] = b;
-			for (j < i) {
-				if (pcs[j] == pcs[i]) {
-					return fail(err, pcs[i], "+%d appears twice, so the path is not acyclic");
-				}
-			}
+			for (j < blocks.length) if (blocks[j].start == pcs[i]) path[i] = blocks[j];
+			if (path[i] == null) return fail(err, pcs[i], "no block starts at +%d");
 		}
-		if (path[0] != entry) {
-			return fail(err, pcs[0], "path starts at +%d, which is not the entry block");
-		}
-		if (path[path.length - 1] != exit) {
-			return fail(err, pcs[pcs.length - 1], "path ends at +%d, which is not the exit block");
-		}
+		if (path[0] != entry) return fail(err, pcs[0], "path starts at +%d, which is not the entry block");
+		if (path[path.length - 1] != exit) return fail(err, pcs[pcs.length - 1], "path ends at +%d, which is not the exit block");
 		for (i < path.length - 1) {
-			def e = edgeBetween(path[i], path[i + 1]);
-			if (e == null) {
-				return fail(err, pcs[i], "no edge leaves the block at +%d for the next one on the path");
-			}
-			if (e.isBackedge) {
-				return fail(err, pcs[i], "the edge out of +%d is a backedge, so the path is not acyclic");
-			}
+			var e: CfgEdge;
+			for (l = path[i].outgoing; l != null; l = l.tail) if (l.head.target == path[i + 1]) e = l.head;
+			if (e == null) return fail(err, pcs[i], "no edge leaves the block at +%d for the next one on the path");
+			if (e.isBackedge) return fail(err, pcs[i], "the edge out of +%d is a backedge, so the path is not acyclic");
 		}
 		return path;
 	}
@@ -117,7 +105,7 @@ class StraightLineMonitor extends Monitor {
 		def buf = WasmAsm.new();
 		def cp = CodePtr.new(f.orig_bytecode);
 		buf.put_u32leb(int.!(cp.read_uleb32()) + scratch.length);
-		for (i = cp.pos; i < body_start; i++) buf.put(f.orig_bytecode[i]);
+		buf.putr(f.orig_bytecode[cp.pos ... body_start]);
 		for (i < scratch.length) {
 			buf.put_u32leb(1);
 			putValueType(buf, scratch[i]);
@@ -183,31 +171,22 @@ class StraightLineMonitor extends Monitor {
 				if (tookTakenArm(b, next)) emitUnwind(f, bi.pc, int.!(bi.immptr().read_uleb32()), 0, buf);
 				return REPLACED;
 			}
-			// the label at index k has its sidetable entry k + 1 entries after the table's header
+			// {outgoing} holds one edge per label in reverse label order, and the label at index k has
+			// its sidetable entry k + 1 entries after the table's header
 			BR_TABLE => {
 				buf.drop();
 				def labels = bi.immptr().read_labels();
-				def k = labelIndex(b, next, labels.length);
+				var k = labels.length - 1;
+				for (l = b.outgoing; l.head.target != next; l = l.tail) k--;
 				emitUnwind(f, bi.pc, labels[k], 4 * (k + 1), buf);
 				return REPLACED;
 			}
 			// the tested value is consumed on the null arm and continues non-null on the other
-			BR_ON_NULL => {
-				if (tookTakenArm(b, next)) {
-					buf.drop();
-					emitUnwind(f, bi.pc, int.!(bi.immptr().read_uleb32()), 0, buf);
-				} else {
-					buf.ref_as_non_null();
-				}
-				return REPLACED;
-			}
-			BR_ON_NON_NULL => {
-				if (tookTakenArm(b, next)) {
-					buf.ref_as_non_null();
-					emitUnwind(f, bi.pc, int.!(bi.immptr().read_uleb32()), 0, buf);
-				} else {
-					buf.drop();
-				}
+			BR_ON_NULL, BR_ON_NON_NULL => {
+				def taken = tookTakenArm(b, next);
+				if (taken == (op == Opcode.BR_ON_NULL)) buf.drop();
+				else buf.ref_as_non_null();
+				if (taken) emitUnwind(f, bi.pc, int.!(bi.immptr().read_uleb32()), 0, buf);
 				return REPLACED;
 			}
 			// the value continues cast on the success arm, and on the failure arm is non-null exactly
@@ -229,112 +208,79 @@ class StraightLineMonitor extends Monitor {
 				return if(emitted, REPLACED, REMOVED);
 			}
 			_ => {
-				def end = bi.nextPc();
-				for (k = bi.pc; k < end; k++) buf.put(f.orig_bytecode[k]);
+				buf.putr(f.orig_bytecode[bi.pc ... bi.nextPc()]);
 				return KEPT;
 			}
 		}
 	}
 	def onFinish(i: Instance, r: Result) {
-		if (code == null) return;
-		out.beginColor(Color.FUNC).put1("straight-lining %q", orig.render(module.names, _)).endColors().ln();
-		printListing(orig);
-		def copy = synthesize(i);
 		if (copy == null) return;
+		out.beginColor(Color.FUNC).put1("straight-lining %q", orig.render(module.names, _)).endColors().ln();
+		printListing(orig, actions);
 		out.beginColor(Color.FUNC).puts("result").endColors().ln();
-		printFunc(WasmFunction.!(copy).decl);
+		printListing(copy, null);
+		def wf = WasmFunction.new(i, copy);
+		Execute.tiering.onNewFunction(wf, ErrorGen.new(module.filename));
 
-		// re-running the original fires its own entry probe, which would append to {calls}
-		probe.on = false;
+		// re-running the original would fire its entry probe, which would append to {calls}
+		Instrumentation.removeLocalProbe(module, orig.func_index, 0, probe);
 		var matched = 0, differed = 0;
 		for (k < calls.length) {
 			def args = calls[k];
-			def got = Execute.call(copy, args);
+			def got = Execute.call(wf, args);
 			def want = Execute.call(i.functions[orig.func_index], args);
 			if (want.equals(got)) matched++;
 			else differed++;
 		}
 		out.put3("  %d calls recorded, %d matched, %d differed", calls.length, matched, differed).ln();
 	}
-	// Builds the straight-lined copy as a new function of the module, bound to this instance.
-	def synthesize(i: Instance) -> Function {
+	// Declares {code} as a new function of the module, reporting through {err} and returning null
+	// if it does not validate.
+	def declare(code: Array<byte>, err: ErrorGen) -> FuncDecl {
 		def f = FuncDecl.new(orig.sig_index);
 		f.setOrigCode(code);
 		f.sig = orig.sig;
 		f.func_index = module.functions.length + module.new_funcs++;
-		def err = ErrorGen.new(module.filename);
+		// validate with a separate error generator, since its positions are in the copy's code
+		def verr = ErrorGen.new(module.filename);
 		def ext = Extension.set.all;
-		Execute.tiering.onFuncBody(module, u32.!(f.func_index), code, err);
-		def v = CodeValidator.new(ext, Limits.new().set(ext), module, err);
+		Execute.tiering.onFuncBody(module, u32.!(f.func_index), code, verr);
+		def v = CodeValidator.new(ext, Limits.new().set(ext), module, verr);
 		match (v.validateFunc(f, 0)) {
-			Ok => ;
+			Ok => return f;
 			Error(error_code, error_pos, error_msg) => {
-				out.put2("straightline: generated code is invalid at +%d: %s", error_pos, error_msg).ln();
+				err.abs(0).set(Strings.format2("generated code is invalid at +%d: %s", error_pos, error_msg));
 				return null;
 			}
 		}
-		def wf = WasmFunction.new(i, f);
-		Execute.tiering.onNewFunction(wf, err);
-		return wf;
 	}
-	// The whole original function, marking what became of each instruction.
-	def printListing(f: FuncDecl) {
+	// Lists {f}, marking what became of each instruction according to {acts}, or all kept if null.
+	def printListing(f: FuncDecl, acts: Array<byte>) {
 		def p = CfgPrinter.new();
 		def entries = p.compute(module, f);
 		var act = KEPT;
 		for (j < entries.length) {
 			def e = entries[j];
 			// a continuation line carries no pc of its own, so it stays with the row above it
-			if (e.pc >= 0) act = actions[e.pc];
-			out.beginColor(colorOf(act));
-			out.sp();
+			if (acts != null && e.pc >= 0) act = acts[e.pc];
+			out.beginColor(COLORS[act]).sp();
 			e.render(p.lmax, p.rmax, out);
-			def note = noteOf(act);
-			if (e.pc >= 0 && note.length > 0) out.puts(note);
-			out.endColors();
-			out.ln();
-		}
-	}
-	def printFunc(f: FuncDecl) {
-		def p = CfgPrinter.new();
-		def entries = p.compute(module, f);
-		for (j < entries.length) {
-			out.beginColor(Color.COVERED);
-			out.sp();
-			entries[j].render(p.lmax, p.rmax, out);
-			out.endColors();
-			out.ln();
+			if (e.pc >= 0) out.puts(NOTES[act]);
+			out.endColors().ln();
 		}
 	}
 }
 
-def colorOf(act: byte) -> Color {
-	match (act) {
-		REPLACED => return Color.MEDIUM;
-		KEPT => return Color.COVERED;
-		_ => return Color.INACTIVE;
-	}
-}
-def noteOf(act: byte) -> string {
-	match (act) {
-		REPLACED => return "replaced";
-		REMOVED => return "removed";
-		KEPT => return "";
-		_ => return "removed, block not on path";
-	}
-}
-
-// what became of the instruction at a given pc
+// what became of the instruction at a given pc; 0 is an instruction in a block off the path
 def KEPT: byte = 1;
 def REMOVED: byte = 2;
 def REPLACED: byte = 3;
+def COLORS = [Color.INACTIVE, Color.COVERED, Color.INACTIVE, Color.MEDIUM];
+def NOTES = ["removed, block not on path", "", "removed", "replaced"];
 
 // Records the arguments of every call, so the straight-lined copy can be run on the same inputs.
 class ArgProbe(func: FuncDecl, calls: Vector<Array<Value>>) extends Probe {
-	var on = true;
-
 	def fire(dynamicLoc: DynamicLoc) -> ProbeAction {
-		if (!on) return ProbeAction.Continue;
 		def n = func.sig.params.length;
 		def args = Array<Value>.new(n);
 		def acc = dynamicLoc.frame.getFrameAccessor();
@@ -349,32 +295,11 @@ def fail(err: ErrorGen, pc: int, fmt: string) -> Array<CfgBlock> {
 	err.abs(u64.!(pc)).set(Strings.format1(fmt, pc));
 	return null;
 }
-def findByStart(blocks: Vector<CfgBlock>, pc: int) -> CfgBlock {
-	for (i < blocks.length) {
-		if (blocks[i].start == pc) return blocks[i];
-	}
-	return null;
-}
-def edgeBetween(from: CfgBlock, to: CfgBlock) -> CfgEdge {
-	for (l = from.outgoing; l != null; l = l.tail) {
-		if (l.head.target == to) return l.head;
-	}
-	return null;
-}
 // {outgoing} is [fallthrough, taken] for a two-way branch, the order the profiler's probes rely on.
 def tookTakenArm(b: CfgBlock, next: CfgBlock) -> bool {
 	def o = b.outgoing;
 	if (o == null || o.tail == null) return false;
 	return o.tail.head.target == next;
-}
-// {outgoing} holds one edge per br_table label, in reverse label order.
-def labelIndex(b: CfgBlock, next: CfgBlock, count: int) -> int {
-	var k = count - 1;
-	for (l = b.outgoing; l != null; l = l.tail) {
-		if (l.head.target == next) return k;
-		k--;
-	}
-	return -1;
 }
 def putValueType(buf: WasmAsm, t: ValueType) {
 	match (t) {
@@ -407,32 +332,13 @@ def putValueType(buf: WasmAsm, t: ValueType) {
 		_ => System.error("StraightLineError", "a label value has a type with no binary encoding");
 	}
 }
-// The CFG builder faults on exception handlers, so they have to be caught before it runs.
-def hasHandlers(f: FuncDecl) -> bool {
-	def bi = BytecodeIterator.new().reset(f);
-	while (bi.more()) {
-		match (bi.current()) {
-			TRY, TRY_TABLE => return true;
-			_ => ;
-		}
-		bi.next();
-	}
-	return false;
-}
 def parsePcs(s: string) -> Array<int> {
 	if (s == null) return null;
-	def v = Vector<int>.new();
-	var i = 0;
-	while (i < s.length) {
-		def t = Ints.parsePosDecimal(s, i);
-		if (t.0 == 0) return null;
-		v.put(int.!(t.1));
-		i += t.0;
-		if (i < s.length) {
-			if (s[i] != ':') return null;
-			i++;
-		}
+	def parts = Strings.split(s, ":", -1), pcs = Array<int>.new(parts.length);
+	for (i < parts.length) {
+		def t = Ints.parsePosDecimal(parts[i], 0);
+		if (t.0 == 0 || t.0 != parts[i].length) return null;
+		pcs[i] = int.!(t.1);
 	}
-	if (v.length == 0) return null;
-	return v.extract();
+	return pcs;
 }
