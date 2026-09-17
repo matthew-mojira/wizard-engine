@@ -138,6 +138,25 @@ for target in $TEST_TARGETS; do
     fi
 done
 
+# Path specialization tests
+for target in $TEST_TARGETS; do
+    export TEST_TARGET=$target
+    if [ "$target" != "x86-64-linux" ]; then
+        skip straightline "no JIT support"
+        continue
+    fi
+    if [[ $DEFAULT_MODES = 1 ]]; then
+        TEST_MODE=jit $SCRIPT_LOC/straightline/test.sh || exit_if_failure $?
+        TEST_MODE=lazy $SCRIPT_LOC/straightline/test.sh || exit_if_failure $?
+        TEST_MODE=dyn $SCRIPT_LOC/straightline/test.sh || exit_if_failure $?
+        TEST_MODE=spc $SCRIPT_LOC/straightline/test.sh || exit_if_failure $?
+    elif [[ "$TEST_MODE" = "jit" || "$TEST_MODE" = "lazy" || "$TEST_MODE" = "dyn" || "$TEST_MODE" = "spc" ]]; then
+        $SCRIPT_LOC/straightline/test.sh || exit_if_failure $?
+    else
+        skip straightline "requires JIT mode"
+    fi
+done
+
 # Fast call tests
 for target in $TEST_TARGETS; do
     export TEST_TARGET=$target

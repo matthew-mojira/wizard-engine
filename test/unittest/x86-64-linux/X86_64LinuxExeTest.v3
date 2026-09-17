@@ -15,7 +15,13 @@ component X86_64LinuxExeTest {
 				("i32.add", test_i32_add),
 				("load_oob0", test_load_oob0),
 				("call1005", test_call1005),		// intended to trigger OSR
-				("shared_reg_merge", test_shared_reg_merge)
+				("shared_reg_merge", test_shared_reg_merge),
+				("path_br_if1", test_path_br_if1),
+				("path_br_if0", test_path_br_if0),
+				("path_if1", test_path_if1),
+				("path_if0", test_path_if0),
+				("path_br_table0", test_path_br_table0),
+				("path_br_tableN", test_path_br_tableN)
 				]) {
 				// register strategy/test pair
 				UnitTests.registerT(strategy.0, test.0, newTester, test.1);
@@ -74,6 +80,69 @@ def test_shared_reg_merge(i: ExeTester) {
 	]);
 	i.args_i(7).assert2_i(7);
 	i.args_i(0).assert2_i(5);
+}
+
+// Runs {code} specialized to the path whose blocks start at {pcs}. {on} is an (argument, result)
+// that follows the path and {off} one that fails a guard and so must tier down.
+def check_path(i: ExeTester, code: Array<byte>, pcs: Array<int>, on: (int, int), off: (int, int)) {
+	CompilerOptions.STRAIGHTLINE.val = List.new((i.func.func_index, pcs), null);
+	i.sig(SigCache.i_i).codev(code);
+	// dyn stays in the interpreter this briefly, so it never reaches a guard
+	var after = Metrics.spc_tierdowns.val + if(X86_64DynamicStrategy.?(i.tiering), 0u, 1u);
+	i.args_i(off.0).assert2_i(off.1);
+	i.t.assert_eq(after, Metrics.spc_tierdowns.val);
+	i.args_i(on.0).assert2_i(on.1);
+	i.t.assert_eq(after, Metrics.spc_tierdowns.val);
+	CompilerOptions.STRAIGHTLINE.val = null;
+}
+
+def PATH_BR_IF: Array<byte> = [
+	u8.!(Opcode.BLOCK.code), NONE,
+	u8.!(Opcode.LOCAL_GET.code), 0,
+	u8.!(Opcode.BR_IF.code), 0,
+	u8.!(Opcode.I32_CONST.code), 11,
+	u8.!(Opcode.RETURN.code),
+	u8.!(Opcode.END.code),
+	u8.!(Opcode.I32_CONST.code), 22];
+
+def test_path_br_if1(i: ExeTester) {
+	check_path(i, PATH_BR_IF, [1, 10, 13], (5, 22), (0, 11)); // taken
+}
+def test_path_br_if0(i: ExeTester) {
+	check_path(i, PATH_BR_IF, [1, 7, 13], (0, 11), (5, 22)); // fallthrough
+}
+
+def PATH_IF: Array<byte> = [
+	u8.!(Opcode.LOCAL_GET.code), 0,
+	u8.!(Opcode.IF.code), BpTypeCode.I32.code,
+	u8.!(Opcode.I32_CONST.code), 11,
+	u8.!(Opcode.ELSE.code),
+	u8.!(Opcode.I32_CONST.code), 22,
+	u8.!(Opcode.END.code)];
+
+def test_path_if1(i: ExeTester) {
+	check_path(i, PATH_IF, [1, 5, 10, 11], (5, 11), (0, 22)); // then
+}
+def test_path_if0(i: ExeTester) {
+	check_path(i, PATH_IF, [1, 8, 10, 11], (0, 22), (5, 11)); // else
+}
+
+def PATH_BR_TABLE: Array<byte> = [
+	u8.!(Opcode.BLOCK.code), NONE,
+	u8.!(Opcode.BLOCK.code), NONE,
+	u8.!(Opcode.LOCAL_GET.code), 0,
+	u8.!(Opcode.BR_TABLE.code), 1, 0, 1,
+	u8.!(Opcode.END.code),
+	u8.!(Opcode.I32_CONST.code), 11,
+	u8.!(Opcode.RETURN.code),
+	u8.!(Opcode.END.code),
+	u8.!(Opcode.I32_CONST.code), 22];
+
+def test_path_br_table0(i: ExeTester) {
+	check_path(i, PATH_BR_TABLE, [1, 11, 18], (0, 11), (5, 22)); // label 0
+}
+def test_path_br_tableN(i: ExeTester) {
+	check_path(i, PATH_BR_TABLE, [1, 15, 18], (5, 22), (0, 11)); // default
 }
 
 def test_call1005(i: ExeTester) {

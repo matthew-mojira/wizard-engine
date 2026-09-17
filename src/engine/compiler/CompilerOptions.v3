@@ -4,6 +4,7 @@
 // Parses command-line options that configure an engine.
 component CompilerOptions {
 	def JIT_FILTER = Option<DeclFilter>.new("jit-filter", null, DeclFilters.parseString);
+	def STRAIGHTLINE = Option<List<(int, Array<int>)>>.new("straightline", null, SpcPaths.parse);
 	var group: OptionGroup;
 
 	new() {
@@ -12,6 +13,7 @@ component CompilerOptions {
 		group = OptionsRegistry.newGroup("COMPILER", printHelp);
 
 		group.add(group.o.add(JIT_FILTER), "=<function patterns>", "Only compile functions matching the filter.");
+		group.add(group.o.add(STRAIGHTLINE), "=<func>@<pc>:<pc>...[,...]", "Compile each function specialized to the path whose blocks start at the given pcs.");
 
 		group.newIntOption("tierup-threshold", SpcTuning.fastIntTierUpThreshold, "Threshold at which \"dyn\" mode triggers JIT compilation.")
 			.onSet(fun v => void(SpcTuning.fastIntTierUpThreshold = v));

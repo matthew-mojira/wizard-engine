@@ -263,7 +263,7 @@ class X86_64SpcStrategy extends X86_64ExecutionStrategy {
 		var masm = X86_64MacroAssembler.!(compiler.masm), w = masm.asm.w;
 
 		// generate code for the function
-		var success = compiler.gen(module, wf.decl, null);
+		var success = genFunc(compiler, module, wf.decl, null);
 
 		// Check for remaining code space
 		var regionSize = code.mapping.range.size();
@@ -346,7 +346,7 @@ class X86_64SpcAotStrategy(interpreter_fallback: bool) extends X86_64SpcStrategy
 			var f = module.functions[i];
 			if (f.imported()) continue;
 			var start = w.atEnd().pos;
-			var compiled = applyJitFilter(module, f, "aot") && compiler.gen(module, f, suberr);
+			var compiled = applyJitFilter(module, f, "aot") && genFunc(compiler, module, f, suberr);
 			if (compiled) bounds[i] = (start, w.end());
 			else bounds[i] = (-1, -1);
 		}
@@ -478,6 +478,16 @@ def allocateCodeForModule(module: Module, codeSize: int) {
 		module.filename, (mapping.range.start - Pointer.NULL), (mapping.range.end - Pointer.NULL)).ln();
 }
 
+// Compiles {func}, specialized to its path if the straightline option names it.
+def genFunc(compiler: X86_64SinglePassCompiler, module: Module, func: FuncDecl, err: ErrorGen) -> bool {
+	for (l = CompilerOptions.STRAIGHTLINE.get(); l != null; l = l.tail) {
+		if (l.head.0 != func.func_index) continue;
+		var perr = ErrorGen.new(module.filename), arms = SpcPaths.resolve(func, l.head.1, perr);
+		if (arms != null) return compiler.genPath(module, func, arms, err);
+		Trace.OUT.put2("func[%d] not specialized to its path: %s", func.func_index, perr.error_msg).ln();
+	}
+	return compiler.gen(module, func, err);
+}
 def applyJitFilter(module: Module, func: FuncDecl, how: string) -> bool {
 	var filter = CompilerOptions.JIT_FILTER.get();
 	if (filter == null || filter.matches(module, func)) return true;

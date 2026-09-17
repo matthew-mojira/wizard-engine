@@ -95,6 +95,10 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 	def state = SpcState.new(regAlloc);
 	// Other state
 	def trap_labels = Vector<(TrapReason, MasmLabel, Array<SpcFrame>)>.new();
+	// the out-of-line stub of each path guard, with the state to spill when the guard fails
+	def tierdown_labels = Vector<(MasmLabel, Array<SpcVal>)>.new();
+	// the arm the path being specialized to takes at each decision, indexed by pc; null if none
+	var path_arms: Array<int>;
 
 	var it = BytecodeIterator.new();
 
@@ -141,6 +145,13 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 		var ok = Metrics.spc_time_us.run(gen0, (module, func));
 		return if(ok, osr_entry_label);
 	}
+	// Compiles {func} specialized to the path that takes {arms}, guarding each of its decisions.
+	def genPath(module: Module, func: FuncDecl, arms: Array<int>, err: ErrorGen) -> bool {
+		this.path_arms = arms;
+		var ok = gen(module, func, err);
+		this.path_arms = null;
+		return ok;
+	}
 	private def gen0(module: Module, func: FuncDecl) -> bool {
 		if (Trace.compiler) OUT.put1("==== begin compile: %q ========================", func.render(module.names, _)).ln();
 		var before_code_bytes = masm.curCodeBytes();
@@ -149,6 +160,7 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 		// Reset internal state.
 		regAlloc.clear();
 		trap_labels.resize(0);
+		tierdown_labels.resize(0);
 		success = true;
 		osr_offset = -1;
 		osr_state = null;
@@ -224,6 +236,9 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 			}
 			masm.emit_jump_to_trap_at(reason);
 		}
+
+		// Emit tier-down stubs.
+		for (i < tierdown_labels.length) emitTierDown(tierdown_labels[i].0, tierdown_labels[i].1);
 
 		// Emit handler stubs.
 		if (Trace.exception) Trace.OUT.put1("Generating %d handler stubs", handler_dest_info.length).ln();
@@ -717,18 +732,26 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 	}
 	def visit_IF(btc: BlockTypeCode) {
 		var pr = btc.toAbstractBlockType(module);
+		var arm = pathArm(), snap = snapshot(arm);
 		var sv = pop();
 		var ctl_top = state.pushIf(pr.0, pr.1, masm.newLabel(it.pc), masm.newLabel(it.pc));
-		emitBrIf(sv, MasmBrCond.I32_ZERO, ctl_top.else_label, ctl_top, true, BrRepush.NONE);
+		if (arm < 0 || !emitGuard(sv, if(arm == 1, MasmBrCond.I32_ZERO, MasmBrCond.I32_NONZERO), snap)) {
+			return emitBrIf(sv, MasmBrCond.I32_ZERO, ctl_top.else_label, ctl_top, true, BrRepush.NONE);
+		}
+		// whichever arm the path does not take is skipped
+		ctl_top.skip_else = arm == 1;
+		if (arm == 0) setUnreachable();
 	}
 	def visit_ELSE() {
 		var ctl_top = state.ctl_stack.peek();
 		state.emitFallthru(resolver);
-		masm.emit_br(ctl_top.label);
+		// nothing falls out of an unreachable arm, and a skipped else leaves nothing to jump over
+		if (ctl_top.reachable && !ctl_top.skip_else) masm.emit_br(ctl_top.label);
 		masm.bindLabel(ctl_top.else_label);
 		state.doElse();
 		ctl_top.opcode = Opcode.ELSE.code;
 		emitProbe();
+		if (ctl_top.skip_else) setUnreachable();
 	}
 	def visit_TRY(btc: BlockTypeCode) {
 		var pr = btc.toAbstractBlockType(module);
@@ -771,7 +794,7 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 		} else if (ctl_top.opcode == Opcode.IF.code) {
 			// simulate empty if-true block
 			state.emitFallthru(resolver);
-			masm.emit_br(ctl_top.label);
+			if (ctl_top.reachable) masm.emit_br(ctl_top.label); // nothing falls out of an unreachable arm
 			masm.bindLabel(ctl_top.else_label);
 			state.doElse();
 			ctl_top.opcode = Opcode.ELSE.code;
@@ -803,23 +826,49 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 	}
 	def visit_BR_IF(depth: u31) {
 		var target = state.getControl(depth);
+		var arm = pathArm(), snap = snapshot(arm);
 		var sv = pop();
-		emitBrIf(sv, MasmBrCond.I32_NONZERO, target.label, target, state.isTransferEmpty(target), BrRepush.NONE);
+		if (arm < 0 || !emitGuard(sv, if(arm == 1, MasmBrCond.I32_ZERO, MasmBrCond.I32_NONZERO), snap)) {
+			return emitBrIf(sv, MasmBrCond.I32_NONZERO, target.label, target, state.isTransferEmpty(target), BrRepush.NONE);
+		}
+		if (arm == 1) visit_BR(depth);
 	}
 	def visit_BR_ON_NULL(depth: u31) {
 		var target = state.getControl(depth);
+		var arm = pathArm(), snap = snapshot(arm);
 		var sv = pop();
-		emitBrIf(sv, MasmBrCond.REF_NULL, target.label, target, state.isTransferEmpty(target), BrRepush.NOT_TAKEN);
+		if (arm < 0 || !emitGuard(sv, if(arm == 1, MasmBrCond.REF_NONNULL, MasmBrCond.REF_NULL), snap)) {
+			return emitBrIf(sv, MasmBrCond.REF_NULL, target.label, target, state.isTransferEmpty(target), BrRepush.NOT_TAKEN);
+		}
+		if (arm == 1) visit_BR(depth);
+		else state.pushV(sv);
 	}
 	def visit_BR_ON_NON_NULL(depth: u31) {
 		var target = state.getControl(depth);
+		var arm = pathArm(), snap = snapshot(arm);
 		var sv = pop();
-		emitBrIf(sv, MasmBrCond.REF_NONNULL, target.label, target, state.isTransferEmpty(target), BrRepush.TAKEN);
+		if (arm < 0 || !emitGuard(sv, if(arm == 1, MasmBrCond.REF_NULL, MasmBrCond.REF_NONNULL), snap)) {
+			return emitBrIf(sv, MasmBrCond.REF_NONNULL, target.label, target, state.isTransferEmpty(target), BrRepush.TAKEN);
+		}
+		if (arm == 0) return;
+		state.pushV(sv);
+		visit_BR(depth);
 	}
 	def visit_BR_TABLE(depths: Range<u31>) {
+		var arm = pathArm(), snap = snapshot(arm);
 		var sv = pop();
-		emitBrTable(sv, depths);
-		setUnreachable();
+		if (arm < 0 || sv.isConst()) {
+			emitBrTable(sv, depths);
+			return setUnreachable();
+		}
+		// the scratch register holds the index, since allocating one could move a value in {snap}
+		var label = masm.newLabel(it.pc), reg = sv.reg;
+		tierdown_labels.put((label, snap));
+		if (reg == NO_REG) masm.emit_mov_r_s(sv.kind(), reg = regs.scratch, state.sp);
+		// the last label is the default, which every index past the others takes
+		if (arm < depths.length - 1) masm.emit_brne_r_i(reg, arm, label);
+		else for (j < arm) masm.emit_breq_r_i(reg, j, label);
+		visit_BR(depths[arm]);
 	}
 	def visit_RETURN() {
 		var target = state.ctl_stack.elems[ctl_base_sp];
@@ -1902,16 +1951,22 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 		var nullable: byte = if(imm.null2(), 2, 0);
 		var result = emit_call_runtime_doCast(nullable, imm.ht2); // XXX: statically elimate null, i31
 		var sv = SpcVal(KIND_I32 | IN_REG, result, 0);
-		emitBrIf(sv, MasmBrCond.I1_ONE, target.label, target, state.isTransferEmpty(target), BrRepush.NONE);
+		var arm = pathArm();
+		if (arm < 0) return emitBrIf(sv, MasmBrCond.I1_ONE, target.label, target, state.isTransferEmpty(target), BrRepush.NONE);
 		// fallthru and do nothing on cast fail
+		emitGuard(sv, if(arm == 1, MasmBrCond.I1_ZERO, MasmBrCond.I1_ONE), snapshot(arm));
+		if (arm == 1) visit_BR(imm.depth);
 	}
 	def visit_BR_ON_CAST_FAIL(imm: BrOnCastImm) {
 		var target = state.getControl(imm.depth);
 		var nullable: byte = if(imm.null2(), 2, 0);
 		var result = emit_call_runtime_doCast(nullable, imm.ht2); // XXX: statically elimate null, i31
 		var sv = SpcVal(KIND_I32 | IN_REG, result, 0);
-		emitBrIf(sv, MasmBrCond.I1_ZERO, target.label, target, state.isTransferEmpty(target), BrRepush.NONE);
+		var arm = pathArm();
+		if (arm < 0) return emitBrIf(sv, MasmBrCond.I1_ZERO, target.label, target, state.isTransferEmpty(target), BrRepush.NONE);
 		// fallthru and do nothing on cast success
+		emitGuard(sv, if(arm == 1, MasmBrCond.I1_ONE, MasmBrCond.I1_ZERO), snapshot(arm));
+		if (arm == 1) visit_BR(imm.depth);
 	}
 	def visit_ANY_CONVERT_EXTERN() { } // nop
 	def visit_EXTERN_CONVERT_ANY() { } // nop
@@ -2153,6 +2208,44 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 		}
 		resolver.emitMoves();
 		masm.emit_br(osr_loop_label);
+	}
+	// The arm the path being specialized to takes at the current instruction, or -1 if none.
+	def pathArm() -> int {
+		return if(path_arms != null && !isInlined(), path_arms[it.pc], -1);
+	}
+	// The state at a guard, taken before the decision pops the operand it will be re-executed with.
+	def snapshot(arm: int) -> Array<SpcVal> {
+		return if(arm >= 0, Arrays.range(state.state, 0, int.view(state.sp)));
+	}
+	// Tiers down to the interpreter, at the current instruction and in state {snap}, if {sv} meets
+	// {cond}. Returns false, emitting nothing, for a constant that always would: the path is never
+	// taken here, so the decision is better compiled as usual.
+	def emitGuard(sv: SpcVal, cond: MasmBrCond, snap: Array<SpcVal>) -> bool {
+		if (sv.isConst()) return (sv.const == 0) != cond.zero;
+		var label = masm.newLabel(it.pc);
+		tierdown_labels.put((label, snap));
+		if (sv.inReg()) emitBrIfR(sv, cond, label);
+		else masm.emit_br_m(masm.slotAddr(state.sp), cond, label);
+		return true;
+	}
+	// The mirror of {emitOsrEntry}: moves the state at a failed guard from registers to the frame,
+	// then enters the interpreter at the guard's instruction.
+	def emitTierDown(label: MasmLabel, snap: Array<SpcVal>) {
+		masm.bindLabel(label);
+		for (i < u32.!(snap.length)) {
+			var sv = snap[i], stored = sv.withFlags(IS_STORED | TAG_STORED);
+			if (sv != stored) resolver.addMove((i, stored), (i, sv));
+		}
+		resolver.emitMoves();
+		emit_compute_vsp(regs.vsp, u32.!(snap.length));
+		emit_spill_vsp(regs.vsp);
+		masm.emit_store_curstack_vsp(regs.vsp);
+		masm.emit_get_curstack(regs.runtime_arg0);
+		masm.emit_v3_set_X86_64Stack_rsp_r_r(regs.runtime_arg0, regs.sp);
+		masm.emit_push_X86_64Stack_rsp_r_r(regs.runtime_arg0);
+		masm.emit_mov_r_m(ValueKind.REF, regs.runtime_arg1, frame.wasm_func_slot);
+		masm.emit_mov_r_i(regs.runtime_arg2, label.create_pos);
+		masm.emit_call_runtime_TierDown();
 	}
 	def emitTrap(reason: TrapReason) {
 		var label = masm.newTrapLabel(reason);
@@ -2926,6 +3019,8 @@ class SpcControl {
 	var catch_reset_state: Array<SpcVal>;
 	// true if a SPC handler stub has already been recorded for this block
 	var recorded_as_handler = false;
+	// true for an `if` whose then-arm is on the path being specialized to
+	var skip_else = false;
 
 	def clearMerge() {
 		merge_count = 0;

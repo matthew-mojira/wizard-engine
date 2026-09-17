@@ -929,6 +929,9 @@ class X86_64MacroAssembler extends MacroAssembler {
 	def emit_call_runtime_Probe_instr() {
 		emit_call_runtime(X86_64RT.runtime_PROBE_instr);
 	}
+	def emit_call_runtime_TierDown() {
+		emit_call_runtime(X86_64RT.runtime_TIERDOWN);
+	}
 	def emit_call_runtime_getFrameAccessorMetaRef() {
 		emit_call_runtime(X86_64RT.runtime_getFrameAccessorMetaRef);
 	}
