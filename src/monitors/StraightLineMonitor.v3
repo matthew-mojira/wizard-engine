@@ -56,7 +56,7 @@ class StraightLineMonitor extends Monitor {
 		def built = cfgBuilder.build(f);
 		def entry = built.0, exit = built.1;
 		cfgBuilder.addReturnEdges(f, entry, exit);
-		cfgBuilder.spliceEmptyBlocks(entry, exit);
+		cfgBuilder.removeEmptyBlocks(entry, exit);
 		def blocks = Vector<CfgBlock>.new();
 		entry.dfs(blocks.put, null, null);
 

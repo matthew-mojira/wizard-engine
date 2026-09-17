@@ -19,7 +19,7 @@ class PathProfilingMonitor extends Monitor {
 			// every path must end at EXIT, so route all `return`s to EXIT
 			cfgBuilder.addReturnEdges(func, cfgExit.0, exit);
 			// remove empty blocks so that remaining blocks have an instruction to increment
-			cfgBuilder.spliceEmptyBlocks(cfgExit.0, exit);
+			cfgBuilder.removeEmptyBlocks(cfgExit.0, exit);
 			def cfg = advanceEntry(cfgExit.0);
 
 			// (Section 4) general CFG to DAG, by dummy edges around each backedge

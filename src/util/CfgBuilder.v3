@@ -14,11 +14,11 @@ class CfgBuilder {
 
 	new() {
 		ctl_stack.newLabel = newCfgBlock;
+		ctl_stack.splitBlock = splitCfgBlock;
 		ctl_stack.mergeBlock = mergeCfgBlock;
 		ctl_stack.bindLabel = bindCfgBlock;
 	}
 
-	// {exit} is the function's outermost label, which the final `end` targets.
 	def build(func: FuncDecl) -> (CfgBlock, CfgBlock) {
 		entry = ctl_stack.reset();
 		exit = ctl_stack.getEntry(0).label;
@@ -40,9 +40,8 @@ class CfgBuilder {
 		}
 		return (entry, exit);
 	}
-	// Removes a block owning no instruction, which has no pc to carry instrumentation and cannot be
-	// named by its start, by pointing each predecessor straight at its single successor.
-	def spliceEmptyBlocks(entry: CfgBlock, exit: CfgBlock) {
+	// Removes basic blocks without any instructions.
+	def removeEmptyBlocks(entry: CfgBlock, exit: CfgBlock) {
 		def blocks = Vector<CfgBlock>.new();
 		entry.dfs(blocks.put, null, null);
 		for (i < blocks.length) {
@@ -52,16 +51,14 @@ class CfgBuilder {
 			def out = b.outgoing.head, to = out.target;
 			for (l = b.incoming; l != null; l = l.tail) {
 				def e = l.head, p = e.source;
-				// {outgoing} order is the branch's label order, which probes rely on, so splice {e}
-				// out in place: only the cells ahead of it are copied, the rest of the list is shared
+				// {outgoing} order is the branch's label order, so splice {e} out in place
 				var head = p.outgoing, pre: List<CfgEdge>;
 				while (head.head != e) {
 					pre = List.new(head.head, pre);
 					head = head.tail;
 				}
 				def n = newEdge(e.pc, p, to);
-				// {b} forwards unconditionally, so the edge replacing {e} inherits {b}->{to} and
-				// becomes the backedge in its place
+				// {b} forwards unconditionally, so its edge's backedge status carries over
 				n.isBackedge = out.isBackedge;
 				var rebuilt = List.new(n, head.tail);
 				while (pre != null) {
@@ -81,8 +78,7 @@ class CfgBuilder {
 			b.outgoing = null;
 		}
 	}
-	// Links each block ending in `return` to EXIT, which the CFG leaves without a successor. A block
-	// ending in `unreachable` or `throw` traps instead, so it never reaches EXIT and gets no edge.
+	// Links each block ending in `return` to {exit}.
 	def addReturnEdges(func: FuncDecl, entry: CfgBlock, exit: CfgBlock) {
 		bi.reset(func);
 		// post-order, so the dfs never walks an edge added here
@@ -103,18 +99,23 @@ class CfgBuilder {
 		to.incoming = List.new(e, to.incoming);
 		return e;
 	}
+	private def splitCfgBlock(cs: ControlStack<CfgBlock>, from: CfgBlock) -> (CfgBlock, CfgBlock) {
+		if (from == null || cs.isUnreachable()) return (null, null);
+		var pos = bi.pc;
+		var a = newBlock(pos), b = newBlock(pos);
+		link(pos, from, a);
+		link(pos, from, b);
+		return (a, b);
+	}
 	private def newCfgBlock(cs: ControlStack<CfgBlock>) -> CfgBlock {
 		return if(cs.isUnreachable(), null, newBlock(cs.pc));
 	}
-	// a deferred edge takes {cs.pc} so that it still belongs to the branch that chose it
 	private def mergeCfgBlock(cs: ControlStack<CfgBlock>, from: CfgBlock, to: CfgBlock) -> CfgBlock {
-		def wasBackedge = cs.backedge;
-		cs.backedge = false; // only the edge created by this call is the backedge
 		if (from == null || cs.isUnreachable()) return to;
 		// {from} is dead because nothing ever branched to it
 		if (from != entry && from.incoming == null) return to;
 		def e = link(cs.pc, from, to);
-		e.isBackedge = wasBackedge;
+		e.isBackedge = to.bind_pos >= 0 && to.bind_pos < cs.pc;
 		return to;
 	}
 	private def bindCfgBlock(cs: ControlStack<CfgBlock>, pc: int, label: CfgBlock) {
@@ -151,7 +152,6 @@ class CfgBlock(decl_pos: int) {
 	}
 
 	def dfs<R>(pre: CfgBlock -> R, onEdge: CfgEdge -> R, post: CfgBlock -> R) {
-		// XXX visited tracks blocks only for the unmarking, since {mark} is the visited check
 		def visited = Vector<CfgBlock>.new();
 
 		dfs0(pre, onEdge, post, visited);

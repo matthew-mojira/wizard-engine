@@ -7,6 +7,8 @@ func "main"
   block 103 +20 ... 21
     -> block 101 val=0
   block 101 +21 ... 22
+  caller engine
+    counts[0] = 1
   counts[0] = 1
       path: 100 102 103 101
   selfloop[block 102 +18 arm 1] = 4

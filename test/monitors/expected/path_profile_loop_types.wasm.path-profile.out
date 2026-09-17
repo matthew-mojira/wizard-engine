@@ -11,6 +11,14 @@ func #0
   block 101 +27 ... 28
   block 102 +24 ... 27
     -> block 101 val=0 inc=1
+  caller #1 +3
+    counts[3] = 1
+  caller #1 +8
+    counts[3] = 1
+  caller #1 +13
+    counts[0] = 4
+    counts[1] = 1
+    counts[2] = 1
   counts[0] = 4
       path: 100 103 104 101
   counts[1] = 1
@@ -23,5 +31,7 @@ func #1
   block 105 +1 ... 16
     -> block 106 val=0 inc=0
   block 106 +16 ... 17
+  caller engine
+    counts[0] = 1
   counts[0] = 1
       path: 105 106

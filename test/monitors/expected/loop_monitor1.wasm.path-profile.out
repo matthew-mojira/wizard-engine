@@ -2,6 +2,8 @@ func "main"
   block 100 +1 ... 15
     -> block 101 val=0 inc=0
   block 101 +15 ... 16
+  caller engine
+    counts[0] = 1
   counts[0] = 1
       path: 100 101
 func "start"
@@ -11,6 +13,10 @@ func "start"
   block 105 +14 ... 15
     -> block 103 val=0
   block 103 +15 ... 16
+  caller "main" +4
+    counts[0] = 1
+  caller "main" +9
+    counts[0] = 1
   counts[0] = 2
       path: 104 105 103
   selfloop[block 104 +12 arm 1] = 598
@@ -30,6 +36,17 @@ func "foo"
     -> block 107 val=1 inc=5
   block 112 +37 ... 44
     -> block 107 val=0 inc=4
+  caller "foo" +14
+    counts[3] = 36
+    counts[5] = 12
+  caller "main" +13
+    counts[0] = 3
+    counts[1] = 1
+  caller "foo" +42
+    counts[0] = 6
+    counts[1] = 2
+    counts[3] = 3
+    counts[5] = 1
   counts[0] = 9
       path: 108 110 109 107
   counts[1] = 3

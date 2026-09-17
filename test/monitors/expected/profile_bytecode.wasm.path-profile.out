@@ -2,242 +2,280 @@ func #0
   block 100 +1 ... 14
     -> block 101 val=0 inc=0
   block 101 +14 ... 15
+  caller engine
+    counts[0] = 1
   counts[0] = 1
       path: 100 101
 func #1
   block 102 +3 ... 8
-    -> block 106 val=0 DUMMY
-    -> block 104 val=15
-    -> block 105 val=30
-  block 106 +21 ... 30
-    -> block 139 val=0
+    -> block 107 val=0 DUMMY
+    -> block 106 val=15
+    -> block 104 val=30
+  block 107 +21 ... 30
+    -> block 109 val=0
     -> block 108 val=1
-  block 139 +384 ... 385
+  block 109 +384 ... 385
     -> block 103 val=0 inc=0
   block 103 +387 ... 388
   block 108 +30 ... 71
-    -> block 127 val=0
-    -> block 128 val=14
-  block 127 +72 ... 83
-    -> block 129 val=0
-    -> block 130 val=14
-  block 129 +84 ... 115
-    -> block 114 val=0
-    -> block 112 val=1
-    -> block 115 val=2
-    -> block 116 val=3
-    -> block 111 val=4
-    -> block 110 val=4
-    -> block 109 val=4
-    -> block 117 val=4
-    -> block 118 val=5
-    -> block 119 val=6
-    -> block 120 val=7
-    -> block 121 val=8
-    -> block 122 val=9
-    -> block 123 val=10
-    -> block 124 val=11
-    -> block 125 val=12
-    -> block 126 val=13
-  block 114 +361 ... 368
-    -> block 113 val=0
-  block 113 +368 ... 375
-    -> block 103 val=0 inc=1 DUMMY
-    -> block 106 val=0 BACKEDGE
-  block 112 +375 ... 377
-    -> block 103 val=0 inc=2
-  block 115 +325 ... 347
-    -> block 137 val=0
-    -> block 138 val=1
-  block 137 +348 ... 361
-    -> block 113 val=0 inc=2
-  block 138 +347 ... 348
-  block 116 +289 ... 311
-    -> block 135 val=0
-    -> block 136 val=1
-  block 135 +312 ... 325
-    -> block 113 val=0 inc=3
-  block 136 +311 ... 312
-  block 111 +377 ... 379
-  block 110 +379 ... 381
-  block 109 +381 ... 383
-  block 117 +274 ... 289
-    -> block 113 val=0 inc=4
-  block 118 +259 ... 274
-    -> block 113 val=0 inc=5
-  block 119 +185 ... 211
     -> block 131 val=0
-    -> block 132 val=1
-  block 131 +212 ... 236
-    -> block 133 val=0
-    -> block 134 val=1
-  block 133 +237 ... 259
-    -> block 113 val=0 inc=6
-  block 134 +236 ... 237
-  block 132 +211 ... 212
-  block 120 +175 ... 185
-    -> block 113 val=0 inc=7
-  block 121 +165 ... 175
-    -> block 113 val=0 inc=8
-  block 122 +155 ... 165
-    -> block 113 val=0 inc=9
-  block 123 +145 ... 155
-    -> block 113 val=0 inc=10
-  block 124 +135 ... 145
-    -> block 113 val=0 inc=11
-  block 125 +125 ... 135
-    -> block 113 val=0 inc=12
-  block 126 +115 ... 125
-    -> block 113 val=0 inc=13
-  block 130 +83 ... 84
-  block 128 +71 ... 72
-  block 104 +9 ... 21
-    -> block 106 val=0 inc=15
-  block 105 +8 ... 9
+    -> block 129 val=14
+  block 131 +72 ... 83
+    -> block 134 val=0
+    -> block 132 val=14
+  block 134 +84 ... 115
+    -> block 116 val=0
+    -> block 114 val=1
+    -> block 117 val=2
+    -> block 118 val=3
+    -> block 113 val=4
+    -> block 112 val=4
+    -> block 111 val=4
+    -> block 119 val=4
+    -> block 120 val=5
+    -> block 121 val=6
+    -> block 122 val=7
+    -> block 123 val=8
+    -> block 124 val=9
+    -> block 125 val=10
+    -> block 126 val=11
+    -> block 127 val=12
+    -> block 128 val=13
+  block 116 +361 ... 368
+    -> block 115 val=0
+  block 115 +368 ... 375
+    -> block 103 val=0 inc=1 DUMMY
+    -> block 107 val=0 BACKEDGE
+  block 114 +375 ... 377
+    -> block 103 val=0 inc=2
+  block 117 +325 ... 347
+    -> block 146 val=0
+    -> block 144 val=1
+  block 146 +348 ... 361
+    -> block 115 val=0 inc=2
+  block 144 +347 ... 348
+  block 118 +289 ... 311
+    -> block 143 val=0
+    -> block 141 val=1
+  block 143 +312 ... 325
+    -> block 115 val=0 inc=3
+  block 141 +311 ... 312
+  block 113 +377 ... 379
+  block 112 +379 ... 381
+  block 111 +381 ... 383
+  block 119 +274 ... 289
+    -> block 115 val=0 inc=4
+  block 120 +259 ... 274
+    -> block 115 val=0 inc=5
+  block 121 +185 ... 211
+    -> block 137 val=0
+    -> block 135 val=1
+  block 137 +212 ... 236
+    -> block 140 val=0
+    -> block 138 val=1
+  block 140 +237 ... 259
+    -> block 115 val=0 inc=6
+  block 138 +236 ... 237
+  block 135 +211 ... 212
+  block 122 +175 ... 185
+    -> block 115 val=0 inc=7
+  block 123 +165 ... 175
+    -> block 115 val=0 inc=8
+  block 124 +155 ... 165
+    -> block 115 val=0 inc=9
+  block 125 +145 ... 155
+    -> block 115 val=0 inc=10
+  block 126 +135 ... 145
+    -> block 115 val=0 inc=11
+  block 127 +125 ... 135
+    -> block 115 val=0 inc=12
+  block 128 +115 ... 125
+    -> block 115 val=0 inc=13
+  block 132 +83 ... 84
+  block 129 +71 ... 72
+  block 106 +9 ... 21
+    -> block 107 val=0 inc=15
+  block 104 +8 ... 9
+  caller #0 +10
+    counts[2] = 1
+    counts[4] = 1
+    counts[7] = 2
+    counts[11] = 2
+    counts[12] = 2
+    counts[13] = 1
+    counts[25] = 1
+  caller #1 +248
+    counts[0] = 1
+    counts[2] = 2
+    counts[3] = 1
+    counts[4] = 1
+    counts[5] = 1
+    counts[6] = 1
+    counts[7] = 1
+    counts[8] = 1
+    counts[9] = 1
+    counts[10] = 1
+    counts[11] = 3
+    counts[12] = 3
+    counts[13] = 1
+    counts[19] = 1
+    counts[28] = 2
   counts[0] = 1
-      path: 102 106 139 103
+      path: 102 107 109 103
   counts[1] = 0
-      path: 102 106 108 127 129 114 113 103
+      path: 102 107 108 131 134 116 115 103
   counts[2] = 3
-      path: 102 106 108 127 129 112 103
+      path: 102 107 108 131 134 114 103
   counts[3] = 1
-      path: 102 106 108 127 129 115 137 113 103
+      path: 102 107 108 131 134 117 146 115 103
   counts[4] = 2
-      path: 102 106 108 127 129 116 135 113 103
+      path: 102 107 108 131 134 118 143 115 103
   counts[5] = 1
-      path: 102 106 108 127 129 117 113 103
+      path: 102 107 108 131 134 119 115 103
   counts[6] = 1
-      path: 102 106 108 127 129 118 113 103
+      path: 102 107 108 131 134 120 115 103
   counts[7] = 3
-      path: 102 106 108 127 129 119 131 133 113 103
+      path: 102 107 108 131 134 121 137 140 115 103
   counts[8] = 1
-      path: 102 106 108 127 129 120 113 103
+      path: 102 107 108 131 134 122 115 103
   counts[9] = 1
-      path: 102 106 108 127 129 121 113 103
+      path: 102 107 108 131 134 123 115 103
   counts[10] = 1
-      path: 102 106 108 127 129 122 113 103
+      path: 102 107 108 131 134 124 115 103
   counts[11] = 5
-      path: 102 106 108 127 129 123 113 103
+      path: 102 107 108 131 134 125 115 103
   counts[12] = 5
-      path: 102 106 108 127 129 124 113 103
+      path: 102 107 108 131 134 126 115 103
   counts[13] = 2
-      path: 102 106 108 127 129 125 113 103
+      path: 102 107 108 131 134 127 115 103
   counts[14] = 0
-      path: 102 106 108 127 129 126 113 103
+      path: 102 107 108 131 134 128 115 103
   counts[15] = 0
-      path: 102 104 106 139 103
+      path: 102 106 107 109 103
   counts[16] = 0
-      path: 102 104 106 108 127 129 114 113 103
+      path: 102 106 107 108 131 134 116 115 103
   counts[17] = 0
-      path: 102 104 106 108 127 129 112 103
+      path: 102 106 107 108 131 134 114 103
   counts[18] = 0
-      path: 102 104 106 108 127 129 115 137 113 103
+      path: 102 106 107 108 131 134 117 146 115 103
   counts[19] = 1
-      path: 102 104 106 108 127 129 116 135 113 103
+      path: 102 106 107 108 131 134 118 143 115 103
   counts[20] = 0
-      path: 102 104 106 108 127 129 117 113 103
+      path: 102 106 107 108 131 134 119 115 103
   counts[21] = 0
-      path: 102 104 106 108 127 129 118 113 103
+      path: 102 106 107 108 131 134 120 115 103
   counts[22] = 0
-      path: 102 104 106 108 127 129 119 131 133 113 103
+      path: 102 106 107 108 131 134 121 137 140 115 103
   counts[23] = 0
-      path: 102 104 106 108 127 129 120 113 103
+      path: 102 106 107 108 131 134 122 115 103
   counts[24] = 0
-      path: 102 104 106 108 127 129 121 113 103
+      path: 102 106 107 108 131 134 123 115 103
   counts[25] = 1
-      path: 102 104 106 108 127 129 122 113 103
+      path: 102 106 107 108 131 134 124 115 103
   counts[26] = 0
-      path: 102 104 106 108 127 129 123 113 103
+      path: 102 106 107 108 131 134 125 115 103
   counts[27] = 0
-      path: 102 104 106 108 127 129 124 113 103
+      path: 102 106 107 108 131 134 126 115 103
   counts[28] = 2
-      path: 102 104 106 108 127 129 125 113 103
+      path: 102 106 107 108 131 134 127 115 103
   counts[29] = 0
-      path: 102 104 106 108 127 129 126 113 103
+      path: 102 106 107 108 131 134 128 115 103
 func #2
-  block 140 +3 ... 12
-    -> block 144 val=0
-    -> block 143 val=1
-  block 144 +21 ... 27
-    -> block 142 val=0
-  block 142 +27 ... 30
-    -> block 141 val=0 inc=0
-  block 141 +30 ... 31
-  block 143 +12 ... 21
-    -> block 142 val=0 inc=1
-  counts[0] = 0
-      path: 140 144 142 141
-  counts[1] = 1
-      path: 140 143 142 141
-func #3
-  block 145 +1 ... 3
-    -> block 146 val=0 inc=0
-  block 146 +3 ... 4
-  counts[0] = 1
-      path: 145 146
-func #4
-  block 147 +1 ... 9
+  block 147 +3 ... 12
+    -> block 150 val=0
+    -> block 149 val=1
+  block 150 +21 ... 27
+    -> block 151 val=0
+  block 151 +27 ... 30
     -> block 148 val=0 inc=0
-  block 148 +9 ... 10
+  block 148 +30 ... 31
+  block 149 +12 ... 21
+    -> block 151 val=0 inc=1
+  caller #1 +262
+    counts[1] = 1
+  counts[0] = 0
+      path: 147 150 151 148
+  counts[1] = 1
+      path: 147 149 151 148
+func #3
+  block 152 +1 ... 3
+    -> block 153 val=0 inc=0
+  block 153 +3 ... 4
+  caller #1 +277
+    counts[0] = 1
   counts[0] = 1
-      path: 147 148
+      path: 152 153
+func #4
+  block 154 +1 ... 9
+    -> block 155 val=0 inc=0
+  block 155 +9 ... 10
+  caller #3 +1
+    counts[0] = 1
+  counts[0] = 1
+      path: 154 155
 func #5
-  block 149 +1 ... 4
-    -> block 150 val=0 inc=0
-  block 150 +4 ... 5
+  block 156 +1 ... 4
+    -> block 157 val=0 inc=0
+  block 157 +4 ... 5
+  caller #4 +1
+    counts[0] = 1
   counts[0] = 1
-      path: 149 150
+      path: 156 157
 func #6
-  block 151 +1 ... 5
-    -> block 152 val=0 inc=0
-  block 152 +5 ... 6
+  block 158 +1 ... 5
+    -> block 159 val=0 inc=0
+  block 159 +5 ... 6
+  caller #4 +4
+    counts[0] = 1
   counts[0] = 1
-      path: 151 152
+      path: 158 159
 func #7
-  block 153 +1 ... 3
-    -> block 154 val=0 inc=0
-  block 154 +3 ... 4
+  block 160 +1 ... 3
+    -> block 161 val=0 inc=0
+  block 161 +3 ... 4
+  caller #6 +1
+    counts[0] = 1
   counts[0] = 1
-      path: 153 154
+      path: 160 161
 func #8
-  block 155 +1 ... 5
-    -> block 156 val=0 inc=0
-  block 156 +5 ... 6
+  block 162 +1 ... 5
+    -> block 163 val=0 inc=0
+  block 163 +5 ... 6
   counts[0] = 0
-      path: 155 156
+      path: 162 163
 func #9
-  block 157 +1 ... 5
-    -> block 158 val=0 inc=0
-  block 158 +5 ... 6
+  block 164 +1 ... 5
+    -> block 165 val=0 inc=0
+  block 165 +5 ... 6
   counts[0] = 0
-      path: 157 158
+      path: 164 165
 func #10
-  block 159 +1 ... 3
-    -> block 160 val=0 inc=0
-  block 160 +3 ... 4
+  block 166 +1 ... 3
+    -> block 167 val=0 inc=0
+  block 167 +3 ... 4
   counts[0] = 0
-      path: 159 160
+      path: 166 167
 func #11
-  block 161 +1 ... 3
-    -> block 162 val=0 inc=0
-  block 162 +3 ... 4
+  block 168 +1 ... 3
+    -> block 169 val=0 inc=0
+  block 169 +3 ... 4
   counts[0] = 0
-      path: 161 162
+      path: 168 169
 func #12
-  block 163 +1 ... 3
-    -> block 164 val=0 inc=0
-  block 164 +3 ... 4
+  block 170 +1 ... 3
+    -> block 171 val=0 inc=0
+  block 171 +3 ... 4
   counts[0] = 0
-      path: 163 164
+      path: 170 171
 func #13
-  block 165 +1 ... 3
-    -> block 166 val=0 inc=0
-  block 166 +3 ... 4
+  block 172 +1 ... 3
+    -> block 173 val=0 inc=0
+  block 173 +3 ... 4
   counts[0] = 0
-      path: 165 166
+      path: 172 173
 func #14
-  block 167 +1 ... 5
-    -> block 168 val=0 inc=0
-  block 168 +5 ... 6
+  block 174 +1 ... 5
+    -> block 175 val=0 inc=0
+  block 175 +5 ... 6
   counts[0] = 0
-      path: 167 168
+      path: 174 175
