@@ -1,0 +1,66 @@
+func #0
+  block 100 +3 ... 7
+    -> block 102 val=0 DUMMY
+    -> block 102 val=2 inc=2
+  block 102 +7 ... 23
+    -> block 103 val=0
+    -> block 102 val=0 BACKEDGE
+  block 103 +23 ... 27
+    -> block 101 val=0 inc=0 DUMMY
+    -> block 104 val=1 inc=1
+    -> block 102 val=0 BACKEDGE
+  block 101 +38 ... 39
+  block 104 +27 ... 38
+    -> block 101 val=0
+  caller engine
+    counts[3] = 1
+  counts[0] = 0
+      path: 100 102 103 101
+  counts[1] = 0
+      path: 100 102 103 104 101
+  counts[2] = 0
+      path: 100 102 103 101
+  counts[3] = 1
+      path: 100 102 103 104 101
+  selfloop[block 102 +21 arm 1] = 0
+func #1
+  block 105 +1 ... 5
+    -> block 108 val=0
+    -> block 107 val=1
+  block 108 +8 ... 9
+    -> block 109 val=0
+  block 109 +9 ... 10
+    -> block 106 val=0 inc=0
+  block 106 +10 ... 11
+  block 107 +5 ... 8
+    -> block 109 val=0 inc=1
+  caller #0 +30
+    counts[1] = 1
+  counts[0] = 0
+      path: 105 108 109 106
+  counts[1] = 1
+      path: 105 107 109 106
+func #2
+  block 110 +1 ... 5
+    -> block 112 val=0
+    -> block 111 val=2 inc=2
+  block 112 +5 ... 10
+    -> block 113 val=0
+    -> block 111 val=1 inc=1
+  block 113 +10 ... 11
+    -> block 111 val=0 inc=0
+  block 111 +11 ... 12
+  caller #0 +36
+    counts[1] = 1
+  counts[0] = 0
+      path: 110 112 113 111
+  counts[1] = 1
+      path: 110 112 111
+  counts[2] = 0
+      path: 110 111
+func #3
+  block 115 +1 ... 2
+  counts[0] = 0
+      path: 115
+func #4
+  block 116 +1 ... 2

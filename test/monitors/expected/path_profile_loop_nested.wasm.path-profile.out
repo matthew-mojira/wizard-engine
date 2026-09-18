@@ -1,0 +1,52 @@
+func #0
+  block 100 +3 ... 5
+    -> block 103 val=0 DUMMY
+    -> block 106 val=3 DUMMY
+    -> block 103 val=5 inc=5
+  block 103 +5 ... 14
+    -> block 104 val=0
+    -> block 102 val=2
+  block 104 +14 ... 20
+    -> block 106 val=0 inc=-3
+  block 106 +20 ... 29
+    -> block 107 val=0
+    -> block 105 val=1
+  block 107 +29 ... 45
+    -> block 101 val=0 inc=3 DUMMY
+    -> block 106 val=0 BACKEDGE
+  block 101 +60 ... 61
+  block 105 +46 ... 56
+    -> block 101 val=0 inc=4 DUMMY
+    -> block 103 val=0 BACKEDGE
+  block 102 +57 ... 60
+    -> block 101 val=0 inc=2
+  caller #1 +5
+    counts[0] = 2
+    counts[2] = 1
+    counts[3] = 3
+    counts[4] = 3
+    counts[5] = 1
+  counts[0] = 2
+      path: 100 103 104 106 107 101
+  counts[1] = 0
+      path: 100 103 104 106 105 101
+  counts[2] = 1
+      path: 100 103 102 101
+  counts[3] = 3
+      path: 100 106 107 101
+  counts[4] = 3
+      path: 100 106 105 101
+  counts[5] = 1
+      path: 100 103 104 106 107 101
+  counts[6] = 0
+      path: 100 103 104 106 105 101
+  counts[7] = 0
+      path: 100 103 102 101
+func #1
+  block 108 +1 ... 8
+    -> block 109 val=0 inc=0
+  block 109 +8 ... 9
+  caller engine
+    counts[0] = 1
+  counts[0] = 1
+      path: 108 109
