@@ -164,17 +164,20 @@ class TransferStats {
 	def event_sites = Vector<EventSite>.new();
 	def count_sites = Vector<CountSite>.new();
 	def resume_pcs = Vector<(int, int)>.new();	// (function, pc) a suspended stack resumes at
-	var entry_pcs = Array<int>.new(1);		// first pc of each function, -1 if unknown
-	var clause_on = Array<u64>.new(1);	// resume sites with an (on $tag $label) clause
-	var clause_switch = Array<u64>.new(1);	// resume sites with an (on $tag switch) clause
+	def entry_pcs = Vector<int>.new();	// first pc of each function, -1 if unknown
+	def clause_on = Vector<u64>.new();	// resume sites with an (on $tag $label) clause
+	def clause_switch = Vector<u64>.new();	// resume sites with an (on $tag switch) clause
 
+	// Sizes the per-function and per-tag tables once for {module}. {Vector.set} grows to the
+	// exact index, so growing on demand would copy once per function; this grows once.
+	def sizeFor(module: Module) {
+		entry_pcs.grow(module.functions.length);
+		for (i = entry_pcs.length; i < module.functions.length; i++) entry_pcs.set(i, -1);
+		clause_on.grow(module.tags.length);
+		clause_switch.grow(module.tags.length);
+	}
 	def recordEntryPc(func_index: int, pc: int) {
-		if (func_index >= entry_pcs.length) {
-			var old = entry_pcs.length;
-			entry_pcs = Arrays.grow(entry_pcs, func_index + 1);
-			for (i = old; i < entry_pcs.length; i++) entry_pcs[i] = -1;
-		}
-		entry_pcs[func_index] = pc;
+		entry_pcs.set(func_index, pc);
 	}
 	// Classifies where a transfer landed. The first two are recognized from the destination
 	// alone; the rest follow from the opcode that left, since only some can land in a handler.
@@ -191,16 +194,12 @@ class TransferStats {
 			_ => return "unknown";
 		}
 	}
-	// Records one handler clause installed by a resume site.
+	// Records one handler clause installed by a resume site. The tag index is bounded by the
+	// module's tag count, which {sizeFor} has already allocated for.
 	def recordClause(tag: int, is_switch: bool) {
 		if (tag < 0) return;
-		if (is_switch) {
-			if (tag >= clause_switch.length) clause_switch = Arrays.grow(clause_switch, tag + 1);
-			clause_switch[tag]++;
-		} else {
-			if (tag >= clause_on.length) clause_on = Arrays.grow(clause_on, tag + 1);
-			clause_on[tag]++;
-		}
+		var v = if(is_switch, clause_switch, clause_on);
+		v.set(tag, v.get(tag) + 1);
 	}
 
 	// Collects every site with a non-zero dynamic count, hottest first.
@@ -232,6 +231,7 @@ class StackSwitchEventMonitor extends Monitor {
 	var globalProbeRegistered: bool;
 
 	def onParse(m: Module, err: ErrorGen) {
+		stats.sizeFor(m);
 		EventSiteVisitor.new(stats, m).run();
 		if (!globalProbeRegistered) {
 			Instrumentation.insertGlobalProbe(stats.gapProbe);
@@ -345,10 +345,6 @@ def initTagTable() -> TraceTable {
 	return t;
 }
 
-def countAt(array: Array<u64>, tag: int) -> u64 {
-	return if(tag < array.length, array[tag], 0);
-}
-
 // Tallies the sites and dynamic events carrying each tag. Only {suspend}, {switch} and
 // {resume_throw} name a tag; the other opcodes record -1 and are skipped.
 def reportTags(out: TraceBuilder, stats: TransferStats) {
@@ -379,7 +375,7 @@ def reportTags(out: TraceBuilder, stats: TransferStats) {
 	out.ln().beginColor(Color.UNDERLINE).puts("ssevent: tag usage").endColors().ln();
 	tagTable.putTableHeader(out);
 	for (tag < counts.length) {
-		var on = countAt(stats.clause_on, tag), sw = countAt(stats.clause_switch, tag);
+		var on = stats.clause_on.get(tag), sw = stats.clause_switch.get(tag);
 		if (sites[tag] == 0 && on == 0 && sw == 0) continue;
 		tagTable.cells[0].putd(tag);
 		tagTable.cells[1].putd(params[tag]);
