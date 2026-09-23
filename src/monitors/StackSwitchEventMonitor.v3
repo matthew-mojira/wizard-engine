@@ -29,6 +29,13 @@ def tagParamCount(module: Module, tag: int) -> int {
 // A stack-switching site: its static fields are constant for a given program-counter.
 // Cannot extend {CountProbe}, because SPC intrinsifies count probes without checking for an
 // overridden {fire}, which would drop the events this site records.
+// One executed transfer. The fields below are filled in when control lands.
+class TransferEvent(site: EventSite, gap: u64, start: u64) {
+	var dest_func = -1;
+	var dest_pc = -1;
+	var cycles: u64;
+}
+
 class EventSite(monitor: StackSwitchEventMonitor, gapProbe: GapProbe, func_index: int, pc: int, op: StackSwitchOpcode, tag: int, params: int) extends Probe {
 	var count: u64;
 	// Where control landed after this site executed, with a count per destination.
@@ -36,10 +43,11 @@ class EventSite(monitor: StackSwitchEventMonitor, gapProbe: GapProbe, func_index
 
 	def fire(dynamicLoc: DynamicLoc) -> ProbeAction {
 		// The global GapProbe fires first and has already counted this op instruction, thus {gap - 1}.
-		monitor.events.put((this, gapProbe.gap - 1));
+		var e = TransferEvent.new(this, gapProbe.gap - 1, Target.rdtsc());
+		monitor.events.put(e);
 		count++;
 		gapProbe.gap = 0;
-		gapProbe.pending = this; // the next instruction executed is this transfer's destination
+		gapProbe.pending = e; // the next instruction executed is this transfer's destination
 		return ProbeAction.Continue;
 	}
 	// Records that control landed at {pc} in {func_index} after this site executed.
@@ -62,14 +70,17 @@ class CountSite(func_index: int, pc: int, op: StackSwitchOpcode, tag: int) exten
 // Static layout for the event table. Shared by the text and CSV renderers.
 def eventTable = initEventTable();
 def initEventTable() -> TraceTable {
-	var t = TraceTable.new(["#", "Function", "PC", "Opcode", "Tag", "Params", "Gap"]);
-	t.cells[0].set(8,  Justification.RIGHT, Color.COUNT);
+	var t = TraceTable.new(["#", "Function", "PC", "Opcode", "Tag", "Params", "To", "ToPC", "Cycles", "Gap"]);
+	t.cells[0].set(6,  Justification.RIGHT, Color.COUNT);
 	t.cells[1].set(10, Justification.RIGHT, Color.FUNC);
 	t.cells[2].set(6,  Justification.RIGHT, Color.LINE);
 	t.cells[3].set(18, Justification.LEFT,  Color.NONE);
-	t.cells[4].set(8,  Justification.RIGHT, Color.NONE);
-	t.cells[5].set(8,  Justification.RIGHT, Color.NONE);
-	t.cells[6].set(12, Justification.RIGHT, Color.COUNT);
+	t.cells[4].set(5,  Justification.RIGHT, Color.NONE);
+	t.cells[5].set(7,  Justification.RIGHT, Color.NONE);
+	t.cells[6].set(6,  Justification.RIGHT, Color.FUNC);
+	t.cells[7].set(6,  Justification.RIGHT, Color.LINE);
+	t.cells[8].set(9,  Justification.RIGHT, Color.COUNT);
+	t.cells[9].set(9,  Justification.RIGHT, Color.COUNT);
 	return t;
 }
 
@@ -77,14 +88,17 @@ def initEventTable() -> TraceTable {
 // recording is handled by per-site local probes ({EventSite}), so this needs no site lookup.
 class GapProbe extends Probe {
 	var gap: u64; // Num. instructions executed since the last stack-switching op.
-	var pending: EventSite; // set by a site that just transferred; the next instruction is its destination.
+	var pending: TransferEvent; // set by a site that just transferred; the next instruction is its destination.
 
 	def fire(dynamicLoc: DynamicLoc) -> ProbeAction {
 		gap++;
 		if (pending != null) {
-			var site = pending;
+			var e = pending;
 			pending = null;
-			site.recordDest(dynamicLoc.func.decl.func_index, dynamicLoc.pc);
+			e.cycles = Target.rdtsc() - e.start;
+			e.dest_func = dynamicLoc.func.decl.func_index;
+			e.dest_pc = dynamicLoc.pc;
+			e.site.recordDest(e.dest_func, e.dest_pc);
 		}
 		return ProbeAction.Continue;
 	}
@@ -143,7 +157,7 @@ class EventSiteVisitor extends BytecodeInstrumenter {
 
 class StackSwitchEventMonitor extends Monitor {
 	def gapProbe = GapProbe.new();
-	def events = Vector<(EventSite, u64)>.new();
+	def events = Vector<TransferEvent>.new();
 	def static_count = Array<u64>.new(StackSwitchOpcode.count);
 	def event_sites = Vector<EventSite>.new();
 	def count_sites = Vector<CountSite>.new();
@@ -377,14 +391,18 @@ def reportCounts(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
 
 // Fills the shared event-table cells for one event, numerically (so the text and CSV
 // renderers produce identical values).
-def fillRow(i: int, e: EventSite, gap: u64) {
+def fillRow(i: int, e: TransferEvent) {
+	var s = e.site;
 	eventTable.cells[0].putd(i + 1);
-	eventTable.cells[1].putd(e.func_index);
-	eventTable.cells[2].putd(e.pc);
-	eventTable.cells[3].puts(e.op.mnemonic);
-	eventTable.cells[4].putd(e.tag);     // -1 for resume-family ops
-	eventTable.cells[5].putd(e.params);  // -1 for resume-family ops
-	eventTable.cells[6].putd(gap);
+	eventTable.cells[1].putd(s.func_index);
+	eventTable.cells[2].putd(s.pc);
+	eventTable.cells[3].puts(s.op.mnemonic);
+	eventTable.cells[4].putd(s.tag);     // -1 when the opcode names no tag
+	eventTable.cells[5].putd(s.params);  // -1 when the opcode names no tag
+	eventTable.cells[6].putd(e.dest_func); // -1 if control never landed
+	eventTable.cells[7].putd(e.dest_pc);
+	eventTable.cells[8].putd(e.cycles);
+	eventTable.cells[9].putd(e.gap);
 }
 
 def reportText(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
@@ -402,17 +420,17 @@ def reportText(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
 	eventTable.putTableHeader(out);
 	out.flush();
 	for (i < events.length) {
-		fillRow(i, events[i].0, events[i].1);
+		fillRow(i, events[i]);
 		eventTable.putTableRow(out);
 		out.flush();
 	}
 	out.ln();
 }
 
-def reportCSV(out: TraceBuilder, events: Vector<(EventSite, u64)>) {
+def reportCSV(out: TraceBuilder, events: Vector<TransferEvent>) {
 	eventTable.putCsvHeader(out);
 	for (i < events.length) {
-		fillRow(i, events[i].0, events[i].1);
+		fillRow(i, events[i]);
 		eventTable.putCsvRow(out);
 	}
 }
