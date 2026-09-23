@@ -31,13 +31,27 @@ def tagParamCount(module: Module, tag: int) -> int {
 // overridden {fire}, which would drop the events this site records.
 class EventSite(monitor: StackSwitchEventMonitor, gapProbe: GapProbe, func_index: int, pc: int, op: StackSwitchOpcode, tag: int, params: int) extends Probe {
 	var count: u64;
+	// Where control landed after this site executed, with a count per destination.
+	def dests = Vector<(int, int, u64)>.new();
 
 	def fire(dynamicLoc: DynamicLoc) -> ProbeAction {
 		// The global GapProbe fires first and has already counted this op instruction, thus {gap - 1}.
 		monitor.events.put((this, gapProbe.gap - 1));
 		count++;
 		gapProbe.gap = 0;
+		gapProbe.pending = this; // the next instruction executed is this transfer's destination
 		return ProbeAction.Continue;
+	}
+	// Records that control landed at {pc} in {func_index} after this site executed.
+	def recordDest(func_index: int, pc: int) {
+		for (i < dests.length) {
+			var d = dests[i];
+			if (d.0 == func_index && d.1 == pc) {
+				dests[i] = (d.0, d.1, d.2 + 1);
+				return;
+			}
+		}
+		dests.put((func_index, pc, 1));
 	}
 }
 
@@ -63,7 +77,17 @@ def initEventTable() -> TraceTable {
 // recording is handled by per-site local probes ({EventSite}), so this needs no site lookup.
 class GapProbe extends Probe {
 	var gap: u64; // Num. instructions executed since the last stack-switching op.
-	def fire(dynamicLoc: DynamicLoc) -> ProbeAction { gap++; return ProbeAction.Continue; }
+	var pending: EventSite; // set by a site that just transferred; the next instruction is its destination.
+
+	def fire(dynamicLoc: DynamicLoc) -> ProbeAction {
+		gap++;
+		if (pending != null) {
+			var site = pending;
+			pending = null;
+			site.recordDest(dynamicLoc.func.decl.func_index, dynamicLoc.pc);
+		}
+		return ProbeAction.Continue;
+	}
 }
 
 // Installs an {EventSite} local probe at each stack-switching opcode.
@@ -72,8 +96,19 @@ class EventSiteVisitor extends BytecodeInstrumenter {
 
 	new(monitor, module: Module) super(module) { }
 
+	// Records the first pc of each function, to recognize a continuation starting up.
+	def onFunc(func: FuncDecl) {
+		var it = BytecodeIterator.new().reset(func);
+		it.current(); // decodes the first instruction, moving {pc} past the locals declaration
+		monitor.recordEntryPc(func.func_index, it.pc);
+	}
+
 	def add(op: StackSwitchOpcode, tag: int) {
 		monitor.static_count[op.tag]++;
+		// A suspended stack resumes at the instruction after the one that left it.
+		if (op == StackSwitchOpcode.SUSPEND || op == StackSwitchOpcode.SWITCH) {
+			monitor.resume_pcs.put((bi.func.func_index, bi.nextPc()));
+		}
 		var site = EventSite.new(monitor, monitor.gapProbe,
 			bi.func.func_index, bi.pc, op, tag, tagParamCount(module, tag));
 		monitor.event_sites.put(site);
@@ -112,10 +147,35 @@ class StackSwitchEventMonitor extends Monitor {
 	def static_count = Array<u64>.new(StackSwitchOpcode.count);
 	def event_sites = Vector<EventSite>.new();
 	def count_sites = Vector<CountSite>.new();
+	def resume_pcs = Vector<(int, int)>.new();	// (function, pc) a suspended stack resumes at
+	var entry_pcs = Array<int>.new(1);		// first pc of each function, -1 if unknown
 	var clause_on = Array<u64>.new(1);	// resume sites with an (on $tag $label) clause
 	var clause_switch = Array<u64>.new(1);	// resume sites with an (on $tag switch) clause
 	var globalProbeRegistered: bool;
 
+	def recordEntryPc(func_index: int, pc: int) {
+		if (func_index >= entry_pcs.length) {
+			var old = entry_pcs.length;
+			entry_pcs = Arrays.grow(entry_pcs, func_index + 1);
+			for (i = old; i < entry_pcs.length; i++) entry_pcs[i] = -1;
+		}
+		entry_pcs[func_index] = pc;
+	}
+	// Classifies where a transfer landed. The first two are recognized from the destination
+	// alone; the rest follow from the opcode that left, since only some can land in a handler.
+	def destKind(op: StackSwitchOpcode, func_index: int, pc: int) -> string {
+		if (func_index < 0) return "-";
+		if (func_index < entry_pcs.length && entry_pcs[func_index] == pc) return "entry";
+		for (i < resume_pcs.length) {
+			var r = resume_pcs[i];
+			if (r.0 == func_index && r.1 == pc) return "resumption";
+		}
+		match (op) {
+			SUSPEND, SWITCH => return "handler";			// caught by an {on} clause
+			RESUME_THROW, RESUME_THROW_REF => return "catch";	// caught inside the continuation
+			_ => return "unknown";
+		}
+	}
 	// Records one handler clause installed by a resume site.
 	def recordClause(tag: int, is_switch: bool) {
 		if (tag < 0) return;
@@ -199,6 +259,45 @@ def reportSites(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
 			siteTable.putTableRow(out);
 		}
 		if (any) out.flush();
+	}
+}
+
+def destTable = initDestTable();
+def initDestTable() -> TraceTable {
+	var t = TraceTable.new(["Function", "PC", "Kind", "Count", "Percent"]);
+	t.cells[0].set(10, Justification.RIGHT, Color.FUNC);
+	t.cells[1].set(6,  Justification.RIGHT, Color.LINE);
+	t.cells[2].set(12, Justification.LEFT,  Color.NONE);
+	t.cells[3].set(12, Justification.RIGHT, Color.COUNT);
+	t.cells[4].set(10, Justification.RIGHT, Color.COUNT);
+	return t;
+}
+
+// Reports where control landed after each transfer: for a suspension, the handler that caught
+// it; for a switch or resume, the first instruction run on the target stack.
+def reportDests(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
+	var any = false;
+	for (i < monitor.event_sites.length) if (monitor.event_sites[i].dests.length > 0) any = true;
+	if (!any) return;
+	out.ln().beginColor(Color.UNDERLINE).puts("ssevent: transfer destinations").endColors().ln();
+	for (i < monitor.event_sites.length) {
+		var s = monitor.event_sites[i];
+		if (s.dests.length == 0) continue;
+		// Source line, then one row per distinct destination of this site.
+		out.puts("func ").putd(s.func_index).puts(" +").putd(s.pc).puts(" ").puts(s.op.mnemonic);
+		if (s.tag >= 0) out.puts(" tag ").putd(s.tag);
+		out.puts(" -> ").putd(s.dests.length).puts(if(s.dests.length == 1, " target", " targets")).ln();
+		destTable.putTableHeader(out);
+		for (j < s.dests.length) {
+			var d = s.dests[j];
+			destTable.cells[0].putd(d.0);
+			destTable.cells[1].putd(d.1);
+			destTable.cells[2].puts(monitor.destKind(s.op, d.0, d.1));
+			destTable.cells[3].putd(d.2);
+			TraceUtil.renderPercent(destTable.cells[4], long.view(d.2), long.view(s.count), 2);
+			destTable.putTableRow(out);
+		}
+		out.flush();
 	}
 }
 
@@ -294,6 +393,7 @@ def reportText(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
 	reportCounts(out, monitor);
 	reportSites(out, monitor);
 	reportTags(out, monitor);
+	reportDests(out, monitor);
 	out.ln().beginColor(Color.UNDERLINE).puts("ssevent: stack-switching event trace").endColors().ln();
 	if (events.length == 0) {
 		out.puts("  (no stack-switching events were executed)").ln();
