@@ -38,6 +38,7 @@ class TransferEvent(site: EventSite, gap: u64, start: u64) {
 
 class EventSite(stats: TransferStats, gapProbe: GapProbe, func_index: int, pc: int, op: StackSwitchOpcode, tag: int, params: int) extends Probe {
 	var count: u64;
+	var landed: u64;	// executions whose destination was observed; the last one of a run is not
 	// Where control landed after this site executed, with a count per destination.
 	def dests = Vector<(int, int, u64)>.new();
 
@@ -52,6 +53,7 @@ class EventSite(stats: TransferStats, gapProbe: GapProbe, func_index: int, pc: i
 	}
 	// Records that control landed at {pc} in {func_index} after this site executed.
 	def recordDest(func_index: int, pc: int) {
+		landed++;
 		for (i < dests.length) {
 			var d = dests[i];
 			if (d.0 == func_index && d.1 == pc) {
@@ -188,8 +190,9 @@ class TransferStats {
 			var r = resume_pcs[i];
 			if (r.0 == func_index && r.1 == pc) return "resumption";
 		}
+		// A {switch} transfers into its target continuation, so it never lands in an {on} clause.
 		match (op) {
-			SUSPEND, SWITCH => return "handler";			// caught by an {on} clause
+			SUSPEND => return "handler";				// caught by an {on} clause
 			RESUME_THROW, RESUME_THROW_REF => return "catch";	// caught inside the continuation
 			_ => return "unknown";
 		}
@@ -242,6 +245,10 @@ class StackSwitchEventMonitor extends Monitor {
 	def onFinish(i: Instance, r: Result) {
 		if (MonitorOptions.CSV.val) reportCSV(out, stats.events);
 		else reportText(out, stats);
+		// This runs once per instantiation, per --repeat iteration and per spectest invoke, so
+		// a transfer left dangling here must not be resolved by the next run's first instruction.
+		stats.gapProbe.pending = null;
+		stats.gapProbe.gap = 0;
 	}
 }
 
@@ -303,7 +310,9 @@ def initDestTable() -> TraceTable {
 // it; for a switch or resume, the first instruction run on the target stack.
 def reportDests(out: TraceBuilder, stats: TransferStats) {
 	var any = false;
-	for (i < stats.event_sites.length) if (stats.event_sites[i].dests.length > 0) any = true;
+	for (i < stats.event_sites.length) {
+		if (stats.event_sites[i].count > 0) any = true;
+	}
 	if (!any) return;
 	var C = destTable.cells;
 	C[0].color = Color.FUNC;
@@ -314,11 +323,12 @@ def reportDests(out: TraceBuilder, stats: TransferStats) {
 	out.ln().beginColor(Color.UNDERLINE).puts("ssevent: transfer destinations").endColors().ln();
 	for (i < stats.event_sites.length) {
 		var s = stats.event_sites[i];
-		if (s.dests.length == 0) continue;
+		if (s.count == 0) continue;
 		// Source line, then one row per distinct destination of this site.
 		out.puts("func ").putd(s.func_index).puts(" +").putd(s.pc).puts(" ").puts(s.op.mnemonic);
 		if (s.tag >= 0) out.puts(" tag ").putd(s.tag);
 		out.puts(" -> ").putd(s.dests.length).puts(if(s.dests.length == 1, " target", " targets")).ln();
+		if (s.dests.length == 0) continue;
 		destTable.putTableHeader(out);
 		for (j < s.dests.length) {
 			var d = s.dests[j];
@@ -326,7 +336,7 @@ def reportDests(out: TraceBuilder, stats: TransferStats) {
 			destTable.cells[1].putd(d.1);
 			destTable.cells[2].puts(stats.destKind(s.op, d.0, d.1));
 			destTable.cells[3].putd(d.2);
-			TraceUtil.renderPercent(destTable.cells[4], long.view(d.2), long.view(s.count), 2);
+			TraceUtil.renderPercent(destTable.cells[4], long.view(d.2), long.view(s.landed), 2);
 			destTable.putTableRow(out);
 		}
 		out.flush();
@@ -347,11 +357,17 @@ def initTagTable() -> TraceTable {
 
 // Tallies the sites and dynamic events carrying each tag. Only {suspend}, {switch} and
 // {resume_throw} name a tag; the other opcodes record -1 and are skipped.
+// A {resume_throw} names an exception tag, which shares an index space with suspension tags but
+// is not one, so its sites are left out of this table.
+def namesSuspensionTag(s: EventSite) -> bool {
+	return s.tag >= 0 && s.op != StackSwitchOpcode.RESUME_THROW;
+}
+
 def reportTags(out: TraceBuilder, stats: TransferStats) {
 	var max_tag = -1;
 	for (i < stats.event_sites.length) {
-		var t = stats.event_sites[i].tag;
-		if (t > max_tag) max_tag = t;
+		var s = stats.event_sites[i];
+		if (namesSuspensionTag(s) && s.tag > max_tag) max_tag = s.tag;
 	}
 	if (stats.clause_on.length - 1 > max_tag) max_tag = stats.clause_on.length - 1;
 	if (stats.clause_switch.length - 1 > max_tag) max_tag = stats.clause_switch.length - 1;
@@ -361,7 +377,7 @@ def reportTags(out: TraceBuilder, stats: TransferStats) {
 	var params = Array<int>.new(max_tag + 1);
 	for (i < stats.event_sites.length) {
 		var s = stats.event_sites[i];
-		if (s.tag < 0) continue;
+		if (!namesSuspensionTag(s)) continue;
 		counts[s.tag] += s.count;
 		sites[s.tag]++;
 		params[s.tag] = s.params;
