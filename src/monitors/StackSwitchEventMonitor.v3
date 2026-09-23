@@ -92,7 +92,7 @@ class EventSiteVisitor extends BytecodeInstrumenter {
 	def visit_SUSPEND(tag: u31) { add(StackSwitchOpcode.SUSPEND, int.view(tag)); }
 	def visit_SWITCH(cont: u31, tag: u31) { add(StackSwitchOpcode.SWITCH, int.view(tag)); }
 	def visit_RESUME(cont: u31, handlers: Range<SuspensionHandler>) { add(StackSwitchOpcode.RESUME, -1); }
-	def visit_RESUME_THROW(cont: u31, tag: u31, handlers: Range<SuspensionHandler>) { add(StackSwitchOpcode.RESUME_THROW, -1); }
+	def visit_RESUME_THROW(cont: u31, tag: u31, handlers: Range<SuspensionHandler>) { add(StackSwitchOpcode.RESUME_THROW, int.view(tag)); }
 	def visit_RESUME_THROW_REF(cont: u31, handlers: Range<SuspensionHandler>) { add(StackSwitchOpcode.RESUME_THROW_REF, -1); }
 }
 
@@ -178,6 +178,48 @@ def reportSites(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
 	}
 }
 
+def tagTable = initTagTable();
+def initTagTable() -> TraceTable {
+	var t = TraceTable.new(["Tag", "Params", "Sites", "Count"]);
+	t.cells[0].set(6,  Justification.RIGHT, Color.NONE);
+	t.cells[1].set(8,  Justification.RIGHT, Color.NONE);
+	t.cells[2].set(7,  Justification.RIGHT, Color.NONE);
+	t.cells[3].set(12, Justification.RIGHT, Color.COUNT);
+	return t;
+}
+
+// Tallies the sites and dynamic events carrying each tag. Only {suspend}, {switch} and
+// {resume_throw} name a tag; the other opcodes record -1 and are skipped.
+def reportTags(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
+	var max_tag = -1;
+	for (i < monitor.event_sites.length) {
+		var t = monitor.event_sites[i].tag;
+		if (t > max_tag) max_tag = t;
+	}
+	if (max_tag < 0) return;
+	var counts = Array<u64>.new(max_tag + 1);
+	var sites = Array<u64>.new(max_tag + 1);
+	var params = Array<int>.new(max_tag + 1);
+	for (i < monitor.event_sites.length) {
+		var s = monitor.event_sites[i];
+		if (s.tag < 0) continue;
+		counts[s.tag] += s.count;
+		sites[s.tag]++;
+		params[s.tag] = s.params;
+	}
+	out.ln().beginColor(Color.UNDERLINE).puts("ssevent: tag usage").endColors().ln();
+	tagTable.putTableHeader(out);
+	for (tag < counts.length) {
+		if (sites[tag] == 0) continue;
+		tagTable.cells[0].putd(tag);
+		tagTable.cells[1].putd(params[tag]);
+		tagTable.cells[2].putd(sites[tag]);
+		tagTable.cells[3].putd(counts[tag]);
+		tagTable.putTableRow(out);
+	}
+	out.flush();
+}
+
 def countTable = initCountTable();
 def initCountTable() -> TraceTable {
 	var t = TraceTable.new(["Opcode", "static", "dynamic"]);
@@ -216,6 +258,7 @@ def reportText(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
 	out.beginColor(Color.UNDERLINE).puts("ssevent: stack-switching instruction counts").endColors().ln();
 	reportCounts(out, monitor);
 	reportSites(out, monitor);
+	reportTags(out, monitor);
 	out.ln().beginColor(Color.UNDERLINE).puts("ssevent: stack-switching event trace").endColors().ln();
 	if (events.length == 0) {
 		out.puts("  (no stack-switching events were executed)").ln();
