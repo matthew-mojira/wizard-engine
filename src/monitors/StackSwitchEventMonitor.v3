@@ -36,7 +36,7 @@ class TransferEvent(site: EventSite, gap: u64, start: u64) {
 	var cycles: u64;
 }
 
-class EventSite(monitor: StackSwitchEventMonitor, gapProbe: GapProbe, func_index: int, pc: int, op: StackSwitchOpcode, tag: int, params: int) extends Probe {
+class EventSite(stats: TransferStats, gapProbe: GapProbe, func_index: int, pc: int, op: StackSwitchOpcode, tag: int, params: int) extends Probe {
 	var count: u64;
 	// Where control landed after this site executed, with a count per destination.
 	def dests = Vector<(int, int, u64)>.new();
@@ -44,7 +44,7 @@ class EventSite(monitor: StackSwitchEventMonitor, gapProbe: GapProbe, func_index
 	def fire(dynamicLoc: DynamicLoc) -> ProbeAction {
 		// The global GapProbe fires first and has already counted this op instruction, thus {gap - 1}.
 		var e = TransferEvent.new(this, gapProbe.gap - 1, Target.rdtsc());
-		monitor.events.put(e);
+		stats.events.put(e);
 		count++;
 		gapProbe.gap = 0;
 		gapProbe.pending = e; // the next instruction executed is this transfer's destination
@@ -106,26 +106,26 @@ class GapProbe extends Probe {
 
 // Installs an {EventSite} local probe at each stack-switching opcode.
 class EventSiteVisitor extends BytecodeInstrumenter {
-	def monitor: StackSwitchEventMonitor;
+	def stats: TransferStats;
 
-	new(monitor, module: Module) super(module) { }
+	new(stats, module: Module) super(module) { }
 
 	// Records the first pc of each function, to recognize a continuation starting up.
 	def onFunc(func: FuncDecl) {
 		var it = BytecodeIterator.new().reset(func);
 		it.current(); // decodes the first instruction, moving {pc} past the locals declaration
-		monitor.recordEntryPc(func.func_index, it.pc);
+		stats.recordEntryPc(func.func_index, it.pc);
 	}
 
 	def add(op: StackSwitchOpcode, tag: int) {
-		monitor.static_count[op.tag]++;
+		stats.static_count[op.tag]++;
 		// A suspended stack resumes at the instruction after the one that left it.
 		if (op == StackSwitchOpcode.SUSPEND || op == StackSwitchOpcode.SWITCH) {
-			monitor.resume_pcs.put((bi.func.func_index, bi.nextPc()));
+			stats.resume_pcs.put((bi.func.func_index, bi.nextPc()));
 		}
-		var site = EventSite.new(monitor, monitor.gapProbe,
+		var site = EventSite.new(stats, stats.gapProbe,
 			bi.func.func_index, bi.pc, op, tag, tagParamCount(module, tag));
-		monitor.event_sites.put(site);
+		stats.event_sites.put(site);
 		insertProbeHere(site);
 	}
 	// Adds a traced site and tallies the handler clauses the resume site installs.
@@ -133,16 +133,16 @@ class EventSiteVisitor extends BytecodeInstrumenter {
 		add(op, tag);
 		for (h in handlers) {
 			match (h) {
-				Suspend(tag_index, depth) => monitor.recordClause(int.view(tag_index), false);
-				Switch(tag_index) => monitor.recordClause(int.view(tag_index), true);
+				Suspend(tag_index, depth) => stats.recordClause(int.view(tag_index), false);
+				Switch(tag_index) => stats.recordClause(int.view(tag_index), true);
 			}
 		}
 	}
 	// Adds a count-only site for an opcode that is not traced.
 	def count(op: StackSwitchOpcode) {
-		monitor.static_count[op.tag]++;
+		stats.static_count[op.tag]++;
 		var site = CountSite.new(bi.func.func_index, bi.pc, op, -1);
-		monitor.count_sites.put(site);
+		stats.count_sites.put(site);
 		insertProbeHere(site);
 	}
 
@@ -155,7 +155,8 @@ class EventSiteVisitor extends BytecodeInstrumenter {
 	def visit_RESUME_THROW_REF(cont: u31, handlers: Range<SuspensionHandler>) { addResume(StackSwitchOpcode.RESUME_THROW_REF, -1, handlers); }
 }
 
-class StackSwitchEventMonitor extends Monitor {
+// Everything the probes record and the report reads. Probes hold this rather than the monitor.
+class TransferStats {
 	def gapProbe = GapProbe.new();
 	def events = Vector<TransferEvent>.new();
 	def static_count = Array<u64>.new(StackSwitchOpcode.count);
@@ -165,7 +166,6 @@ class StackSwitchEventMonitor extends Monitor {
 	var entry_pcs = Array<int>.new(1);		// first pc of each function, -1 if unknown
 	var clause_on = Array<u64>.new(1);	// resume sites with an (on $tag $label) clause
 	var clause_switch = Array<u64>.new(1);	// resume sites with an (on $tag switch) clause
-	var globalProbeRegistered: bool;
 
 	def recordEntryPc(func_index: int, pc: int) {
 		if (func_index >= entry_pcs.length) {
@@ -224,17 +224,23 @@ class StackSwitchEventMonitor extends Monitor {
 		return sum;
 	}
 
+}
+
+class StackSwitchEventMonitor extends Monitor {
+	def stats = TransferStats.new();
+	var globalProbeRegistered: bool;
+
 	def onParse(m: Module, err: ErrorGen) {
-		EventSiteVisitor.new(this, m).run();
+		EventSiteVisitor.new(stats, m).run();
 		if (!globalProbeRegistered) {
-			Instrumentation.insertGlobalProbe(gapProbe);
+			Instrumentation.insertGlobalProbe(stats.gapProbe);
 			globalProbeRegistered = true;
 		}
 	}
 
 	def onFinish(i: Instance, r: Result) {
-		if (MonitorOptions.CSV.val) reportCSV(out, events);
-		else reportText(out, this);
+		if (MonitorOptions.CSV.val) reportCSV(out, stats.events);
+		else reportText(out, stats);
 	}
 }
 
@@ -252,8 +258,8 @@ def initSiteTable() -> TraceTable {
 	return t;
 }
 
-def reportSites(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
-	var sites = monitor.hotSites();
+def reportSites(out: TraceBuilder, stats: TransferStats) {
+	var sites = stats.hotSites();
 	if (sites.length == 0) return;
 	var C = siteTable.cells;
 	C[0].color = Color.FUNC;
@@ -294,9 +300,9 @@ def initDestTable() -> TraceTable {
 
 // Reports where control landed after each transfer: for a suspension, the handler that caught
 // it; for a switch or resume, the first instruction run on the target stack.
-def reportDests(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
+def reportDests(out: TraceBuilder, stats: TransferStats) {
 	var any = false;
-	for (i < monitor.event_sites.length) if (monitor.event_sites[i].dests.length > 0) any = true;
+	for (i < stats.event_sites.length) if (stats.event_sites[i].dests.length > 0) any = true;
 	if (!any) return;
 	var C = destTable.cells;
 	C[0].color = Color.FUNC;
@@ -305,8 +311,8 @@ def reportDests(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
 	C[3].color = Color.COUNT;
 	C[4].color = Color.COUNT;
 	out.ln().beginColor(Color.UNDERLINE).puts("ssevent: transfer destinations").endColors().ln();
-	for (i < monitor.event_sites.length) {
-		var s = monitor.event_sites[i];
+	for (i < stats.event_sites.length) {
+		var s = stats.event_sites[i];
 		if (s.dests.length == 0) continue;
 		// Source line, then one row per distinct destination of this site.
 		out.puts("func ").putd(s.func_index).puts(" +").putd(s.pc).puts(" ").puts(s.op.mnemonic);
@@ -317,7 +323,7 @@ def reportDests(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
 			var d = s.dests[j];
 			destTable.cells[0].putd(d.0);
 			destTable.cells[1].putd(d.1);
-			destTable.cells[2].puts(monitor.destKind(s.op, d.0, d.1));
+			destTable.cells[2].puts(stats.destKind(s.op, d.0, d.1));
 			destTable.cells[3].putd(d.2);
 			TraceUtil.renderPercent(destTable.cells[4], long.view(d.2), long.view(s.count), 2);
 			destTable.putTableRow(out);
@@ -344,20 +350,20 @@ def countAt(array: Array<u64>, tag: int) -> u64 {
 
 // Tallies the sites and dynamic events carrying each tag. Only {suspend}, {switch} and
 // {resume_throw} name a tag; the other opcodes record -1 and are skipped.
-def reportTags(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
+def reportTags(out: TraceBuilder, stats: TransferStats) {
 	var max_tag = -1;
-	for (i < monitor.event_sites.length) {
-		var t = monitor.event_sites[i].tag;
+	for (i < stats.event_sites.length) {
+		var t = stats.event_sites[i].tag;
 		if (t > max_tag) max_tag = t;
 	}
-	if (monitor.clause_on.length - 1 > max_tag) max_tag = monitor.clause_on.length - 1;
-	if (monitor.clause_switch.length - 1 > max_tag) max_tag = monitor.clause_switch.length - 1;
+	if (stats.clause_on.length - 1 > max_tag) max_tag = stats.clause_on.length - 1;
+	if (stats.clause_switch.length - 1 > max_tag) max_tag = stats.clause_switch.length - 1;
 	if (max_tag < 0) return;
 	var counts = Array<u64>.new(max_tag + 1);
 	var sites = Array<u64>.new(max_tag + 1);
 	var params = Array<int>.new(max_tag + 1);
-	for (i < monitor.event_sites.length) {
-		var s = monitor.event_sites[i];
+	for (i < stats.event_sites.length) {
+		var s = stats.event_sites[i];
 		if (s.tag < 0) continue;
 		counts[s.tag] += s.count;
 		sites[s.tag]++;
@@ -372,7 +378,7 @@ def reportTags(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
 	out.ln().beginColor(Color.UNDERLINE).puts("ssevent: tag usage").endColors().ln();
 	tagTable.putTableHeader(out);
 	for (tag < counts.length) {
-		var on = countAt(monitor.clause_on, tag), sw = countAt(monitor.clause_switch, tag);
+		var on = countAt(stats.clause_on, tag), sw = countAt(stats.clause_switch, tag);
 		if (sites[tag] == 0 && on == 0 && sw == 0) continue;
 		tagTable.cells[0].putd(tag);
 		tagTable.cells[1].putd(params[tag]);
@@ -394,17 +400,17 @@ def initCountTable() -> TraceTable {
 	return t;
 }
 
-def reportCounts(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
+def reportCounts(out: TraceBuilder, stats: TransferStats) {
 	var C = countTable.cells;
 	C[0].color = Color.INSTR;
 	C[1].color = Color.INACTIVE;	// static
 	C[2].color = Color.COUNT;	// dynamic
 	countTable.putTableHeader(out);
 	for (op in StackSwitchOpcode) {
-		if (monitor.static_count[op.tag] == 0) continue;
+		if (stats.static_count[op.tag] == 0) continue;
 		countTable.cells[0].puts(op.mnemonic);
-		countTable.cells[1].putd(monitor.static_count[op.tag]);
-		countTable.cells[2].putd(monitor.dynamicCount(op));
+		countTable.cells[1].putd(stats.static_count[op.tag]);
+		countTable.cells[2].putd(stats.dynamicCount(op));
 		countTable.putTableRow(out);
 	}
 	out.flush();
@@ -426,13 +432,13 @@ def fillRow(i: int, e: TransferEvent) {
 	eventTable.cells[9].putd(e.gap);
 }
 
-def reportText(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
-	def events = monitor.events;
+def reportText(out: TraceBuilder, stats: TransferStats) {
+	def events = stats.events;
 	out.beginColor(Color.UNDERLINE).puts("ssevent: stack-switching instruction counts").endColors().ln();
-	reportCounts(out, monitor);
-	reportSites(out, monitor);
-	reportTags(out, monitor);
-	reportDests(out, monitor);
+	reportCounts(out, stats);
+	reportSites(out, stats);
+	reportTags(out, stats);
+	reportDests(out, stats);
 	var C = eventTable.cells;
 	C[1].color = Color.FUNC;
 	C[2].color = Color.LINE;
