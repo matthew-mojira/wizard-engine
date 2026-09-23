@@ -70,7 +70,7 @@ class CountSite(func_index: int, pc: int, op: StackSwitchOpcode, tag: int) exten
 // Static layout for the event table. Shared by the text and CSV renderers.
 def eventTable = initEventTable();
 def initEventTable() -> TraceTable {
-	var t = TraceTable.new(["#", "Function", "PC", "Opcode", "Tag", "Params", "ToFunction", "ToPC", "Cycles", "Gap"]);
+	var t = TraceTable.new(["#", "Function", "PC", "Opcode", "Tag", "Params", "ToFunction", "ToPC", "Kind", "Cycles", "Gap"]);
 	t.cells[0].set(6,  Justification.RIGHT, Color.NONE);
 	t.cells[1].set(10, Justification.RIGHT, Color.NONE);
 	t.cells[2].set(6,  Justification.RIGHT, Color.NONE);
@@ -79,8 +79,9 @@ def initEventTable() -> TraceTable {
 	t.cells[5].set(7,  Justification.RIGHT, Color.NONE);
 	t.cells[6].set(11, Justification.RIGHT, Color.NONE);
 	t.cells[7].set(6,  Justification.RIGHT, Color.NONE);
-	t.cells[8].set(9,  Justification.RIGHT, Color.NONE);
+	t.cells[8].set(12, Justification.LEFT,  Color.NONE);
 	t.cells[9].set(9,  Justification.RIGHT, Color.NONE);
+	t.cells[10].set(9, Justification.RIGHT, Color.NONE);
 	return t;
 }
 
@@ -428,8 +429,9 @@ def fillRow(i: int, e: TransferEvent) {
 	eventTable.cells[5].putd(s.params);  // -1 when the opcode names no tag
 	eventTable.cells[6].putd(e.dest_func); // -1 if control never landed
 	eventTable.cells[7].putd(e.dest_pc);
-	eventTable.cells[8].putd(e.cycles);
-	eventTable.cells[9].putd(e.gap);
+	eventTable.cells[8].puts(s.stats.destKind(s.op, e.dest_func, e.dest_pc));
+	eventTable.cells[9].putd(e.cycles);
+	eventTable.cells[10].putd(e.gap);
 }
 
 def reportText(out: TraceBuilder, stats: TransferStats) {
@@ -446,8 +448,9 @@ def reportText(out: TraceBuilder, stats: TransferStats) {
 	C[4].color = Color.TYPE;
 	C[6].color = Color.FUNC;
 	C[7].color = Color.LINE;
-	C[8].color = Color.COUNT;
+	C[8].color = Color.TYPE;
 	C[9].color = Color.COUNT;
+	C[10].color = Color.COUNT;
 	out.ln().beginColor(Color.UNDERLINE).puts("ssevent: stack-switching event trace").endColors().ln();
 	if (events.length == 0) {
 		out.puts("  (no stack-switching events were executed)").ln();
