@@ -79,6 +79,16 @@ class EventSiteVisitor extends BytecodeInstrumenter {
 		monitor.event_sites.put(site);
 		insertProbeHere(site);
 	}
+	// Adds a traced site and tallies the handler clauses the resume site installs.
+	def addResume(op: StackSwitchOpcode, tag: int, handlers: Range<SuspensionHandler>) {
+		add(op, tag);
+		for (h in handlers) {
+			match (h) {
+				Suspend(tag_index, depth) => monitor.recordClause(int.view(tag_index), false);
+				Switch(tag_index) => monitor.recordClause(int.view(tag_index), true);
+			}
+		}
+	}
 	// Adds a count-only site for an opcode that is not traced.
 	def count(op: StackSwitchOpcode) {
 		monitor.static_count[op.tag]++;
@@ -91,9 +101,9 @@ class EventSiteVisitor extends BytecodeInstrumenter {
 	def visit_CONT_BIND(in_cont: u31, out_cont: u31) { count(StackSwitchOpcode.CONT_BIND); }
 	def visit_SUSPEND(tag: u31) { add(StackSwitchOpcode.SUSPEND, int.view(tag)); }
 	def visit_SWITCH(cont: u31, tag: u31) { add(StackSwitchOpcode.SWITCH, int.view(tag)); }
-	def visit_RESUME(cont: u31, handlers: Range<SuspensionHandler>) { add(StackSwitchOpcode.RESUME, -1); }
-	def visit_RESUME_THROW(cont: u31, tag: u31, handlers: Range<SuspensionHandler>) { add(StackSwitchOpcode.RESUME_THROW, int.view(tag)); }
-	def visit_RESUME_THROW_REF(cont: u31, handlers: Range<SuspensionHandler>) { add(StackSwitchOpcode.RESUME_THROW_REF, -1); }
+	def visit_RESUME(cont: u31, handlers: Range<SuspensionHandler>) { addResume(StackSwitchOpcode.RESUME, -1, handlers); }
+	def visit_RESUME_THROW(cont: u31, tag: u31, handlers: Range<SuspensionHandler>) { addResume(StackSwitchOpcode.RESUME_THROW, int.view(tag), handlers); }
+	def visit_RESUME_THROW_REF(cont: u31, handlers: Range<SuspensionHandler>) { addResume(StackSwitchOpcode.RESUME_THROW_REF, -1, handlers); }
 }
 
 class StackSwitchEventMonitor extends Monitor {
@@ -102,7 +112,21 @@ class StackSwitchEventMonitor extends Monitor {
 	def static_count = Array<u64>.new(StackSwitchOpcode.count);
 	def event_sites = Vector<EventSite>.new();
 	def count_sites = Vector<CountSite>.new();
+	var clause_on = Array<u64>.new(1);	// resume sites with an (on $tag $label) clause
+	var clause_switch = Array<u64>.new(1);	// resume sites with an (on $tag switch) clause
 	var globalProbeRegistered: bool;
+
+	// Records one handler clause installed by a resume site.
+	def recordClause(tag: int, is_switch: bool) {
+		if (tag < 0) return;
+		if (is_switch) {
+			if (tag >= clause_switch.length) clause_switch = Arrays.grow(clause_switch, tag + 1);
+			clause_switch[tag]++;
+		} else {
+			if (tag >= clause_on.length) clause_on = Arrays.grow(clause_on, tag + 1);
+			clause_on[tag]++;
+		}
+	}
 
 	// Collects every site with a non-zero dynamic count, hottest first.
 	def hotSites() -> Array<(int, int, StackSwitchOpcode, int, u64)> {
@@ -180,12 +204,18 @@ def reportSites(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
 
 def tagTable = initTagTable();
 def initTagTable() -> TraceTable {
-	var t = TraceTable.new(["Tag", "Params", "Sites", "Count"]);
+	var t = TraceTable.new(["Tag", "Params", "Sites", "Count", "OnTag", "OnSw"]);
 	t.cells[0].set(6,  Justification.RIGHT, Color.NONE);
 	t.cells[1].set(8,  Justification.RIGHT, Color.NONE);
-	t.cells[2].set(7,  Justification.RIGHT, Color.NONE);
+	t.cells[2].set(7,  Justification.RIGHT, Color.COUNT);
 	t.cells[3].set(12, Justification.RIGHT, Color.COUNT);
+	t.cells[4].set(7,  Justification.RIGHT, Color.COUNT);
+	t.cells[5].set(6,  Justification.RIGHT, Color.COUNT);
 	return t;
+}
+
+def countAt(array: Array<u64>, tag: int) -> u64 {
+	return if(tag < array.length, array[tag], 0);
 }
 
 // Tallies the sites and dynamic events carrying each tag. Only {suspend}, {switch} and
@@ -196,6 +226,8 @@ def reportTags(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
 		var t = monitor.event_sites[i].tag;
 		if (t > max_tag) max_tag = t;
 	}
+	if (monitor.clause_on.length - 1 > max_tag) max_tag = monitor.clause_on.length - 1;
+	if (monitor.clause_switch.length - 1 > max_tag) max_tag = monitor.clause_switch.length - 1;
 	if (max_tag < 0) return;
 	var counts = Array<u64>.new(max_tag + 1);
 	var sites = Array<u64>.new(max_tag + 1);
@@ -210,11 +242,14 @@ def reportTags(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
 	out.ln().beginColor(Color.UNDERLINE).puts("ssevent: tag usage").endColors().ln();
 	tagTable.putTableHeader(out);
 	for (tag < counts.length) {
-		if (sites[tag] == 0) continue;
+		var on = countAt(monitor.clause_on, tag), sw = countAt(monitor.clause_switch, tag);
+		if (sites[tag] == 0 && on == 0 && sw == 0) continue;
 		tagTable.cells[0].putd(tag);
 		tagTable.cells[1].putd(params[tag]);
 		tagTable.cells[2].putd(sites[tag]);
 		tagTable.cells[3].putd(counts[tag]);
+		tagTable.cells[4].putd(on);
+		tagTable.cells[5].putd(sw);
 		tagTable.putTableRow(out);
 	}
 	out.flush();
