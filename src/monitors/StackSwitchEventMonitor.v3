@@ -6,13 +6,16 @@ def monitor_ = MonitorRegistry.add(
 	"ssevent", "Traces stack-switching events (suspend/switch/resume) as an ordered table.",
 	StackSwitchEventMonitor.new());
 
-// The kinds of stack-switching opcodes that the monitor observes.
-enum StackSwitchOpcode(mnemonic: string) {
-	SUSPEND		("suspend"),
-	RESUME		("resume"),
-	RESUME_THROW	("resume_throw"),
-	RESUME_THROW_REF("resume_throw_ref"),
-	SWITCH		("switch")
+// The kinds of stack-switching opcodes that the monitor observes. {cont.new} and {cont.bind}
+// create continuations rather than transferring control, so they are counted but not traced.
+enum StackSwitchOpcode(mnemonic: string, traced: bool) {
+	CONT_NEW	("cont.new", false),
+	CONT_BIND	("cont.bind", false),
+	SUSPEND		("suspend", true),
+	RESUME		("resume", true),
+	RESUME_THROW	("resume_throw", true),
+	RESUME_THROW_REF("resume_throw_ref", true),
+	SWITCH		("switch", true)
 }
 
 // Returns the number of parameters carried by the tag at index {tag} in {module},
@@ -24,14 +27,23 @@ def tagParamCount(module: Module, tag: int) -> int {
 }
 
 // A stack-switching site: its static fields are constant for a given program-counter.
+// Cannot extend {CountProbe}, because SPC intrinsifies count probes without checking for an
+// overridden {fire}, which would drop the events this site records.
 class EventSite(monitor: StackSwitchEventMonitor, gapProbe: GapProbe, func_index: int, pc: int, op: StackSwitchOpcode, tag: int, params: int) extends Probe {
+	var count: u64;
+
 	def fire(dynamicLoc: DynamicLoc) -> ProbeAction {
 		// The global GapProbe fires first and has already counted this op instruction, thus {gap - 1}.
 		monitor.events.put((this, gapProbe.gap - 1));
+		count++;
 		gapProbe.gap = 0;
 		return ProbeAction.Continue;
 	}
 }
+
+// A site of an opcode that is counted but not traced. Adds no behavior to {CountProbe}, so SPC
+// can intrinsify it.
+class CountSite(func_index: int, pc: int, op: StackSwitchOpcode, tag: int) extends CountProbe { }
 
 // Static layout for the event table. Shared by the text and CSV renderers.
 def eventTable = initEventTable();
@@ -61,10 +73,22 @@ class EventSiteVisitor extends BytecodeInstrumenter {
 	new(monitor, module: Module) super(module) { }
 
 	def add(op: StackSwitchOpcode, tag: int) {
-		insertProbeHere(EventSite.new(monitor, monitor.gapProbe,
-			bi.func.func_index, bi.pc, op, tag, tagParamCount(module, tag)));
+		monitor.static_count[op.tag]++;
+		var site = EventSite.new(monitor, monitor.gapProbe,
+			bi.func.func_index, bi.pc, op, tag, tagParamCount(module, tag));
+		monitor.event_sites.put(site);
+		insertProbeHere(site);
+	}
+	// Adds a count-only site for an opcode that is not traced.
+	def count(op: StackSwitchOpcode) {
+		monitor.static_count[op.tag]++;
+		var site = CountSite.new(bi.func.func_index, bi.pc, op, -1);
+		monitor.count_sites.put(site);
+		insertProbeHere(site);
 	}
 
+	def visit_CONT_NEW(cont: u31) { count(StackSwitchOpcode.CONT_NEW); }
+	def visit_CONT_BIND(in_cont: u31, out_cont: u31) { count(StackSwitchOpcode.CONT_BIND); }
 	def visit_SUSPEND(tag: u31) { add(StackSwitchOpcode.SUSPEND, int.view(tag)); }
 	def visit_SWITCH(cont: u31, tag: u31) { add(StackSwitchOpcode.SWITCH, int.view(tag)); }
 	def visit_RESUME(cont: u31, handlers: Range<SuspensionHandler>) { add(StackSwitchOpcode.RESUME, -1); }
@@ -75,7 +99,32 @@ class EventSiteVisitor extends BytecodeInstrumenter {
 class StackSwitchEventMonitor extends Monitor {
 	def gapProbe = GapProbe.new();
 	def events = Vector<(EventSite, u64)>.new();
+	def static_count = Array<u64>.new(StackSwitchOpcode.count);
+	def event_sites = Vector<EventSite>.new();
+	def count_sites = Vector<CountSite>.new();
 	var globalProbeRegistered: bool;
+
+	// Collects every site with a non-zero dynamic count, hottest first.
+	def hotSites() -> Array<(int, int, StackSwitchOpcode, int, u64)> {
+		var v = Vector<(int, int, StackSwitchOpcode, int, u64)>.new();
+		for (i < event_sites.length) {
+			var s = event_sites[i];
+			if (s.count > 0) v.put((s.func_index, s.pc, s.op, s.tag, s.count));
+		}
+		for (i < count_sites.length) {
+			var s = count_sites[i];
+			if (s.count > 0) v.put((s.func_index, s.pc, s.op, s.tag, s.count));
+		}
+		var array = v.extract();
+		return Arrays.sort(array, 0, array.length, hotter);
+	}
+	// Dynamic executions of {op}, summed over its sites.
+	def dynamicCount(op: StackSwitchOpcode) -> u64 {
+		var sum = 0uL;
+		for (i < event_sites.length) if (event_sites[i].op == op) sum += event_sites[i].count;
+		for (i < count_sites.length) if (count_sites[i].op == op) sum += count_sites[i].count;
+		return sum;
+	}
 
 	def onParse(m: Module, err: ErrorGen) {
 		EventSiteVisitor.new(this, m).run();
@@ -87,8 +136,67 @@ class StackSwitchEventMonitor extends Monitor {
 
 	def onFinish(i: Instance, r: Result) {
 		if (MonitorOptions.CSV.val) reportCSV(out, events);
-		else reportText(out, events);
+		else reportText(out, this);
 	}
+}
+
+def hotter(a: (int, int, StackSwitchOpcode, int, u64), b: (int, int, StackSwitchOpcode, int, u64)) -> bool {
+	return a.4 > b.4;
+}
+
+def siteTable = initSiteTable();
+def initSiteTable() -> TraceTable {
+	var t = TraceTable.new(["Function", "PC", "Tag", "Count"]);
+	t.cells[0].set(10, Justification.RIGHT, Color.FUNC);
+	t.cells[1].set(6,  Justification.RIGHT, Color.LINE);
+	t.cells[2].set(6,  Justification.RIGHT, Color.NONE);
+	t.cells[3].set(12, Justification.RIGHT, Color.COUNT);
+	return t;
+}
+
+def reportSites(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
+	var sites = monitor.hotSites();
+	if (sites.length == 0) return;
+	out.ln().beginColor(Color.UNDERLINE).puts("ssevent: hottest stack-switching sites").endColors().ln();
+	// {sites} is sorted hottest-first, so each opcode's rows stay in that order.
+	for (op in StackSwitchOpcode) {
+		var any = false;
+		for (s in sites) {
+			if (s.2 != op) continue;
+			if (!any) {
+				out.puts(op.mnemonic).puts(":").ln();
+				siteTable.putTableHeader(out);
+				any = true;
+			}
+			siteTable.cells[0].putd(s.0);
+			siteTable.cells[1].putd(s.1);
+			siteTable.cells[2].putd(s.3);
+			siteTable.cells[3].putd(s.4);
+			siteTable.putTableRow(out);
+		}
+		if (any) out.flush();
+	}
+}
+
+def countTable = initCountTable();
+def initCountTable() -> TraceTable {
+	var t = TraceTable.new(["Opcode", "static", "dynamic"]);
+	t.cells[0].set(18, Justification.LEFT,  Color.NONE);
+	t.cells[1].set(8,  Justification.RIGHT, Color.COUNT);
+	t.cells[2].set(12, Justification.RIGHT, Color.COUNT);
+	return t;
+}
+
+def reportCounts(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
+	countTable.putTableHeader(out);
+	for (op in StackSwitchOpcode) {
+		if (monitor.static_count[op.tag] == 0) continue;
+		countTable.cells[0].puts(op.mnemonic);
+		countTable.cells[1].putd(monitor.static_count[op.tag]);
+		countTable.cells[2].putd(monitor.dynamicCount(op));
+		countTable.putTableRow(out);
+	}
+	out.flush();
 }
 
 // Fills the shared event-table cells for one event, numerically (so the text and CSV
@@ -103,8 +211,12 @@ def fillRow(i: int, e: EventSite, gap: u64) {
 	eventTable.cells[6].putd(gap);
 }
 
-def reportText(out: TraceBuilder, events: Vector<(EventSite, u64)>) {
-	out.beginColor(Color.UNDERLINE).puts("ssevent: stack-switching event trace").endColors().ln();
+def reportText(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
+	def events = monitor.events;
+	out.beginColor(Color.UNDERLINE).puts("ssevent: stack-switching instruction counts").endColors().ln();
+	reportCounts(out, monitor);
+	reportSites(out, monitor);
+	out.ln().beginColor(Color.UNDERLINE).puts("ssevent: stack-switching event trace").endColors().ln();
 	if (events.length == 0) {
 		out.puts("  (no stack-switching events were executed)").ln();
 		return;
