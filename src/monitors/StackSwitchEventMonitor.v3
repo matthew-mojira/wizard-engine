@@ -69,6 +69,19 @@ class EventSite(stats: TransferStats, gapProbe: GapProbe, func_index: int, pc: i
 // can intrinsify it.
 class CountSite(func_index: int, pc: int, op: StackSwitchOpcode, tag: int) extends CountProbe { }
 
+// Records the function that an executed {cont.new} turns into a continuation, read from the
+// funcref on top of the operand stack.
+class ContNewProbe(stats: TransferStats) extends Probe {
+	def fire(dynamicLoc: DynamicLoc) -> ProbeAction {
+		var v = dynamicLoc.frame.getFrameAccessor().getTopOfStack();
+		match (Value.Ref.!(v).val) {
+			x: WasmFunction => stats.recordContFunc(x.decl.func_index);
+			_ => ;
+		}
+		return ProbeAction.Continue;
+	}
+}
+
 // Static layout for the event table. Shared by the text and CSV renderers.
 def eventTable = initEventTable();
 def initEventTable() -> TraceTable {
@@ -149,7 +162,10 @@ class EventSiteVisitor extends BytecodeInstrumenter {
 		insertProbeHere(site);
 	}
 
-	def visit_CONT_NEW(cont: u31) { count(StackSwitchOpcode.CONT_NEW); }
+	def visit_CONT_NEW(cont: u31) {
+		count(StackSwitchOpcode.CONT_NEW);
+		insertProbeHere(ContNewProbe.new(stats));
+	}
 	def visit_CONT_BIND(in_cont: u31, out_cont: u31) { count(StackSwitchOpcode.CONT_BIND); }
 	def visit_SUSPEND(tag: u31) { add(StackSwitchOpcode.SUSPEND, int.view(tag)); }
 	def visit_SWITCH(cont: u31, tag: u31) { add(StackSwitchOpcode.SWITCH, int.view(tag)); }
@@ -169,17 +185,24 @@ class TransferStats {
 	def entry_pcs = Vector<int>.new();	// first pc of each function, -1 if unknown
 	def clause_on = Vector<u64>.new();	// resume sites with an (on $tag $label) clause
 	def clause_switch = Vector<u64>.new();	// resume sites with an (on $tag switch) clause
+	def cont_funcs = Vector<u64>.new();	// continuations created from each function by {cont.new}
+	var module: Module;	// for rendering function names
 
 	// Sizes the per-function and per-tag tables once for {module}. {Vector.set} grows to the
 	// exact index, so growing on demand would copy once per function; this grows once.
 	def sizeFor(module: Module) {
+		this.module = module;
 		entry_pcs.grow(module.functions.length);
 		for (i = entry_pcs.length; i < module.functions.length; i++) entry_pcs.set(i, -1);
 		clause_on.grow(module.tags.length);
 		clause_switch.grow(module.tags.length);
+		cont_funcs.grow(module.functions.length);
 	}
 	def recordEntryPc(func_index: int, pc: int) {
 		entry_pcs.set(func_index, pc);
+	}
+	def recordContFunc(func_index: int) {
+		cont_funcs.set(func_index, cont_funcs.get(func_index) + 1);
 	}
 	// Classifies where a transfer landed. The first two are recognized from the destination
 	// alone; the rest follow from the opcode that left, since only some can land in a handler.
@@ -404,6 +427,44 @@ def reportTags(out: TraceBuilder, stats: TransferStats) {
 	out.flush();
 }
 
+def contFuncTable = initContFuncTable();
+def initContFuncTable() -> TraceTable {
+	var t = TraceTable.new(["Function", "Count"]);
+	t.cells[0].set(10, Justification.RIGHT, Color.NONE);
+	t.cells[1].set(12, Justification.RIGHT, Color.NONE);
+	return t;
+}
+
+// Reports each function that {cont.new} turned into a continuation, with how many times.
+def reportContFuncs(out: TraceBuilder, stats: TransferStats) {
+	var any = false;
+	for (i < stats.cont_funcs.length) {
+		if (stats.cont_funcs[i] > 0) any = true;
+	}
+	if (!any) return;
+	var C = contFuncTable.cells;
+	C[0].color = Color.FUNC;
+	C[1].color = Color.COUNT;
+	var m = stats.module;
+	out.ln().beginColor(Color.UNDERLINE).puts("ssevent: continuation functions").endColors().ln();
+	var maxlen = int.!(C[0].width);
+	for (i < stats.cont_funcs.length) { // compute maximum function name length for formatting
+		if (stats.cont_funcs[i] == 0) continue;
+		var sb = m.functions[i].render(m.names, StringBuilder.new());
+		if (sb.length > maxlen) maxlen = sb.length;
+	}
+	C[0].width = if(maxlen > byte.max, byte.max, byte.view(maxlen));
+	contFuncTable.putTableHeader(out);
+	for (i < stats.cont_funcs.length) {
+		var n = stats.cont_funcs[i];
+		if (n == 0) continue;
+		m.functions[i].render(m.names, contFuncTable.cells[0]);
+		contFuncTable.cells[1].putd(n);
+		contFuncTable.putTableRow(out);
+	}
+	out.flush();
+}
+
 def countTable = initCountTable();
 def initCountTable() -> TraceTable {
 	var t = TraceTable.new(["Opcode", "static", "dynamic"]);
@@ -452,6 +513,7 @@ def reportText(out: TraceBuilder, stats: TransferStats) {
 	reportCounts(out, stats);
 	reportSites(out, stats);
 	reportTags(out, stats);
+	reportContFuncs(out, stats);
 	reportDests(out, stats);
 	var C = eventTable.cells;
 	C[1].color = Color.FUNC;
