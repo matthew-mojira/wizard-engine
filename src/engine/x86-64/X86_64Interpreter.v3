@@ -272,6 +272,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 	var controlSkipSidetableAndDispatchLabel = X86_64Label.new();
 	var probedDispatchTableRef: IcCodeRef;
 	var typeTagTableOffset: int;
+	var runtimeCallRetOffset: int; // code offset after the call instruction of the last {callRuntime}
 
 	def r_v3_wasm_func	= G(Target.V3_PARAM_GPRS[1]);
 	def r_v3_vsp		= G(Target.V3_PARAM_GPRS[2]);
@@ -2686,7 +2687,8 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			masm.emit_get_curstack(xenv.tmp1);
 			saveCallerIVars();
 			asm.movq_r_m(r_tmp0, m_wasm_func); // XXX: compute func and pc directly in the right regs
-			ic.header.probeReturnOffset = callRuntime(refRuntimeCall(X86_64RT.runtime_PROBE_instr), [r_tmp1, r_tmp0, r_curpc], true);
+			callRuntime(refRuntimeCall(X86_64RT.runtime_PROBE_instr), [r_tmp1, r_tmp0, r_curpc], true);
+			ic.header.probeReturnOffset = runtimeCallRetOffset;
 			restoreCallerIVars();
 			// Compute a pointer to the original code at this pc offset
 			var pc = r_tmp1; // = IP - CODE
@@ -3721,7 +3723,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 	def restoreDispatchTableReg() {
 		if (!FeatureDisable.globalProbes) masm.emit_restore_dispatch_table_reg(xenv.dispatch);
 	}
-	def callRuntime(abs: Pointer, args: Array<X86_64Gpr>, canTrap: bool) -> int {
+	def callRuntime(abs: Pointer, args: Array<X86_64Gpr>, canTrap: bool) {
 		masm.emit_save_ivar(xenv.vsp);
 		// save a copy of VSP into valueStack.sp
 		masm.emit_get_curstack(xenv.scratch);
@@ -3739,7 +3741,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		for (i < dst.length) orderMoves(dst, stk, i);
 		// emit actual call
 		asm.callr(int.!((abs - (ic.start + w.pos + 5)))); // TODO: handle 64-bit {abs} with movq_r_l
-		var retOffset = w.atEnd().pos;
+		runtimeCallRetOffset = w.atEnd().pos;
 		restoreDispatchTableReg();
 		// restore VSP from valueStack.sp
 		masm.emit_get_curstack(xenv.vsp);
@@ -3747,7 +3749,6 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		// restore old %sp
 		masm.emit_get_curstack(xenv.scratch);
 		masm.emit_pop_NativeStack_rsp_r_r(xenv.scratch);
-		return retOffset;
 	}
 	def orderMoves(dst: Array<X86_64Gpr>, stk: Array<i8>, i: int) {
 		// XXX: use move ordering logic from macro assembler?

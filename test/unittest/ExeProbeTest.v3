@@ -227,7 +227,7 @@ class DeoptOnceProbe extends Probe {
 def test_deopt_probe_fires_once(i: ExeTester) {
 	i.sig(SigCache.i_i);
 	i.code([u8.!(Opcode.LOCAL_GET.code), 0]);
-	var probe = DeoptOnceProbe.new();
+	def probe = DeoptOnceProbe.new();
 	Instrumentation.insertLocalProbe(i.module, i.func.func_index, 1, probe);
 	i.args_i(5).assert2_i(42);
 	i.t.assert_eq(1, probe.count);
@@ -241,7 +241,7 @@ def test_deopt_probe_with_operands(i: ExeTester) {
 		u8.!(Opcode.I32_ADD.code),
 		u8.!(Opcode.LOCAL_GET.code), 0,
 		u8.!(Opcode.I32_ADD.code)]);
-	var probe = DeoptOnceProbe.new();
+	def probe = DeoptOnceProbe.new();
 	Instrumentation.insertLocalProbe(i.module, i.func.func_index, 5, probe);
 	i.args_i(5).assert2_i(48);
 	i.t.assert_eq(1, probe.count);
@@ -263,7 +263,7 @@ class DeoptTwiceProbe extends Probe {
 def test_deopt_multi_write(i: ExeTester) {
 	i.sig(SigCache.i_i);
 	i.code([u8.!(Opcode.LOCAL_GET.code), 0]);
-	var probe = DeoptTwiceProbe.new();
+	def probe = DeoptTwiceProbe.new();
 	Instrumentation.insertLocalProbe(i.module, i.func.func_index, 1, probe);
 	i.args_i(5).assert2_i(43);
 	i.t.assert_eq(1, probe.count);
@@ -276,7 +276,7 @@ def test_deopt_two_probes_same_pc(i: ExeTester) {
 		u8.!(Opcode.LOCAL_GET.code), 0,
 		u8.!(Opcode.I32_CONST.code), 1,
 		u8.!(Opcode.I32_ADD.code)]);
-	var p1 = DeoptOnceProbe.new(), p2 = DeoptOnceProbe.new();
+	def p1 = DeoptOnceProbe.new(), p2 = DeoptOnceProbe.new();
 	Instrumentation.insertLocalProbe(i.module, i.func.func_index, 1, p1);
 	Instrumentation.insertLocalProbe(i.module, i.func.func_index, 1, p2);
 	i.args_i(5).assert2_i(43);
