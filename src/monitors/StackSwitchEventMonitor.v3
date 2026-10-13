@@ -101,15 +101,13 @@ def initEventTable() -> TraceTable {
 	return t;
 }
 
-// Single global probe: fires on every executed instruction to count it and to record where a pending
-// transfer landed; both need every instruction, so one probe does both. Event
-// recording is handled by per-site local probes ({TransferProbe}), so this needs no site lookup.
+// Counts {gap} and records where a pending transfer landed.
 class GapProbe(monitor: StackSwitchEventMonitor) extends Probe {
 	def fire(dynamicLoc: DynamicLoc) -> ProbeAction {
 		monitor.gap++;
 		// {pending} is the last transfer whose destination and cycles are not yet recorded.
 		if (monitor.pending != null) {
-			var e = monitor.pending;
+			def e = monitor.pending;
 			monitor.pending = null;
 			e.cycles = Target.rdtsc() - e.start;
 			e.dest_func = dynamicLoc.func.decl.func_index;
@@ -120,7 +118,8 @@ class GapProbe(monitor: StackSwitchEventMonitor) extends Probe {
 	}
 }
 
-// Installs a {TransferProbe} local probe at each stack-switching opcode.
+// Installs a {TransferProbe} at each suspend, switch and resume-family opcode, and a
+// {ContCountProbe} at each cont.new and cont.bind.
 class EventSiteVisitor extends BytecodeInstrumenter {
 	def monitor: StackSwitchEventMonitor;
 	def stats = monitor.stats;
@@ -128,7 +127,7 @@ class EventSiteVisitor extends BytecodeInstrumenter {
 	new(monitor, module: Module) super(module) { }
 
 	// for a suspend, switch, or resume instruction
-	// - increments its status count (For its function)
+	// - increments its static counts (for its opcode and its function)
 	// - write this down as a transfer site
 	// - inserts transfer probe
 	def add(op: Opcode, tag: int) {
@@ -141,7 +140,8 @@ class EventSiteVisitor extends BytecodeInstrumenter {
 	// Adds a traced site and tallies the handler clauses the resume site installs.
 	def addResume(op: Opcode, tag: int, handlers: Range<SuspensionHandler>) {
 		add(op, tag);
-		// The tag index is bounded by the module's tag count, which {sizeFor} has already allocated for.
+		// Records each handler clause installed by the resume site. The tag index is bounded by the
+		// module's tag count, which {sizeFor} has already allocated for.
 		for (h in handlers) {
 			match (h) {
 				Suspend(tag_index, depth) => stats.clause_on[tag_index] += 1;
@@ -172,7 +172,7 @@ class EventSiteVisitor extends BytecodeInstrumenter {
 	def visit_RESUME_THROW_REF(cont: u31, handlers: Range<SuspensionHandler>) { addResume(Opcode.RESUME_THROW_REF, -1, handlers); }
 }
 
-// Everything the probes record and the report reads. Probes hold this rather than the monitor.
+// Everything the probes record and the report reads.
 class TransferStats {
 	def events = Vector<TransferEvent>.new();
 	def static_count = Array<u64>.new(Opcode.count);
@@ -184,8 +184,7 @@ class TransferStats {
 	def func_sites = Vector<u64>.new();	// stack-switching instructions in each function
 	var module: Module;	// for rendering function names
 
-	// Sizes the per-function and per-tag tables once for {module}. {Vector.set} grows to the
-	// exact index, so growing on demand would copy once per function; this grows once.
+	// Sets size for the per-function and per-tag vvectors for {module}.
 	def sizeFor(module: Module) {
 		this.module = module;
 		clause_on.grow(module.tags.length);
@@ -347,12 +346,12 @@ def initTagTable() -> TraceTable {
 // is not one, so its sites are left out of this table.
 def reportTags(out: TraceBuilder, stats: TransferStats) {
 	// XXX fixed size tag tables based on last module (does not support multiple modules)
-	var ntags = stats.module.tags.length;
+	def ntags = stats.module.tags.length;
 	if (ntags == 0) return;
-	var counts = Array<u64>.new(ntags);
-	var sites = Array<u64>.new(ntags);
+	def counts = Array<u64>.new(ntags);
+	def sites = Array<u64>.new(ntags);
 	for (i < stats.transfer_sites.length) {
-		var s = stats.transfer_sites[i];
+		def s = stats.transfer_sites[i];
 		// Skip sites without a suspension tag: no tag at all, or a resume_throw's exception tag.
 		if (s.site.tag < 0 || s.site.op == Opcode.RESUME_THROW) continue;
 		counts[s.site.tag] += s.count;
@@ -361,7 +360,8 @@ def reportTags(out: TraceBuilder, stats: TransferStats) {
 	out.ln().beginColor(Color.UNDERLINE).puts("ssevent: tag usage").endColors().ln();
 	tagTable.putTableHeader(out);
 	for (tag < counts.length) {
-		var on = stats.clause_on[tag], sw = stats.clause_switch[tag];
+		def on = stats.clause_on[tag];
+		def sw = stats.clause_switch[tag];
 		if (sites[tag] == 0 && on == 0 && sw == 0) continue;
 		tagTable.cells[0].putd(tag);
 		tagTable.cells[1].putd(stats.module.tags[tag].fields.length);
