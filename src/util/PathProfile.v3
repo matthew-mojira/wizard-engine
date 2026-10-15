@@ -355,28 +355,34 @@ class PathProfile(func: FuncDecl) {
 		}
 		selfLoops = loops.extract();
 	}
-	// Prints the route of path {k} as the start pc of each block, with ".." where a dummy edge
-	// enters or leaves a loop (Section 3.2).
-	def renderPath(k: int, out: TraceBuilder) {
+	// Returns the edges of path {k} from ENTRY to EXIT, taking at each vertex the edge whose range
+	// of path sums holds what remains of {k} (Section 3.2).
+	def pathEdges(k: int) -> Array<PathProfilingEdge> {
+		def edges = Vector<PathProfilingEdge>.new();
 		var v = entry;
-		var dummy = false;
 		while (v != exit) {
-			var pick: PathProfilingEdge;
 			for (i < v.outgoing.length) {
 				def e = v.outgoing[i];
 				if (!e.isBackedge && e.val <= k && k < e.val + e.target.numPaths) {
-					pick = e;
+					edges.put(e);
+					k -= e.val;
+					v = e.target;
 					break;
 				}
 			}
-			if (v == entry) out.puts(" ENTRY");
-			else out.put1(" +%d", v.bind_pos);
-			if (pick.isDummy) out.puts(" ..");
-			dummy = pick.isDummy;
-			k -= pick.val;
-			v = pick.target;
 		}
-		if (!dummy) out.puts(" EXIT");
+		return edges.extract();
+	}
+	// Prints the route of path {k} as the start pc of each block, with ".." where a dummy edge
+	// enters or leaves a loop (Section 3.2).
+	def renderPath(k: int, out: TraceBuilder) {
+		def edges = pathEdges(k);
+		for (e in edges) {
+			if (e.source == entry) out.puts(" ENTRY");
+			else out.put1(" +%d", e.source.bind_pos);
+			if (e.isDummy) out.puts(" ..");
+		}
+		if (!edges[edges.length - 1].isDummy) out.puts(" EXIT");
 	}
 }
 

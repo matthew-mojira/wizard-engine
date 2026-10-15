@@ -1,0 +1,202 @@
+// Copyright 2026 Wizard Authors. All rights reserved.
+// See LICENSE for details of Apache 2.0 license.
+
+def E = MonitorRegistry.add(
+	"straightline", "Straight-lines one path through a function.",
+	StraightLineMonitor.new());
+
+def func_opt = E.options.newIntOption("func", -1, "index of the function to straight-line");
+def path_opt = E.options.newIntOption("path", -1, "number of the path to straight-line, as path-profile numbers it");
+
+// Emits a copy of one function specialized to a single path through it. Code off the path becomes
+// `unreachable` and branches the path falls through are removed, so the copy computes the right
+// answer only for inputs that would have followed that path.
+class StraightLineMonitor extends Monitor {
+	def var module: Module;
+	def var orig: FuncDecl;
+	def var copy: FuncDecl; // the straight-lined copy, once it has validated
+	// in the future, this would be stored in the FuncDecl as a map from path number to straightlined pc
+	def var actions: Array<StraightLineAction>; // what became of the instruction at each pc
+	def var code: Array<byte>; // the copy's bytecode, rewritten in place
+	def var err: ErrorGen;
+
+	def onParse(m: Module, err: ErrorGen) {
+		module = m;
+		def fi = func_opt.val;
+		if (fi < 0 || fi >= m.functions.length) {
+			err.abs(0).set(Strings.format1("func index %d out of range", fi));
+			return;
+		}
+		def f = m.functions[fi];
+		if (f.imp != null) {
+			err.abs(0).set(Strings.format1("function #%d is imported and has no body", fi));
+			return;
+		}
+		orig = f;
+		this.err = err;
+
+		// find path from path profiling
+		def path = resolvePath(f, path_opt.val);
+		if (path == null) return;
+
+		// generate straight line bytecode
+		straightline(f, path);
+		if (err.error()) return;
+
+		// turn into a FuncDecl and validate
+		def decl = FuncDecl.new(f.sig_index);
+		decl.setOrigCode(code);
+		decl.sig = f.sig;
+		// validate with a separate error generator, since its positions are in the copy's code
+		def ext = Extension.set.all;
+		def v = CodeValidator.new(ext, Limits.new().set(ext), module, ErrorGen.new(module.filename));
+		match (v.validateFunc(decl, 0)) {
+			Ok => copy = decl;
+			Error(error_code, error_pos, error_msg) => err.abs(0).set(Strings.format2("generated code is invalid at +%d: %s", error_pos, error_msg));
+		}
+	}
+	// Returns the edges of path {k} from ENTRY to EXIT. Returns null if the function cannot be
+	// path-profiled or has no path {k}.
+	def resolvePath(f: FuncDecl, k: int) -> Array<PathProfilingEdge> {
+		// rerun Ball-Larus path profiling on it
+		def profile = PathProfile.new(f);
+		if (!profile.success) {
+			err.abs(0).set(Strings.format1("function #%d cannot be path-profiled, so it cannot be straight-lined", f.func_index));
+			return null;
+		}
+		if (k < 0 || k >= profile.numPaths) {
+			err.abs(0).set(Strings.format2("path %d out of range, the function has %d paths", k, profile.numPaths));
+			return null;
+		}
+		return profile.pathEdges(k);
+	}
+	// Copies the function and rewrites it in place, so every instruction keeps its pc and every label
+	// stays where it was. Reports through {err} if the path goes through an instruction that is not
+	// supported.
+	def straightline(f: FuncDecl, path: Array<PathProfilingEdge>) {
+		code = Arrays.dup(f.orig_bytecode);
+		actions = Array<StraightLineAction>.new(code.length);
+		def bi = BytecodeIterator.new().reset(f);
+		bi.current(); // skip the local declarations
+
+		// for each block, as the source of its edge on the path (ENTRY's edge is skipped)
+		for (e in path[1 ...]) {
+			def b = e.source;
+
+			// for all instructions before this block starts
+			while (bi.pc < b.bind_pos) {
+				actions[bi.pc] = rewriteOffPath(bi);
+				bi.next();
+			}
+
+			// for all instructions inside this block
+			while (bi.pc < b.end) {
+				actions[bi.pc] = rewriteOnPath(bi, e);
+				if (err.error()) return;
+				bi.next();
+			}
+		}
+		// deal with any remaining code that is not on the path
+		while (bi.more()) {
+			actions[bi.pc] = rewriteOffPath(bi);
+			bi.next();
+		}
+	}
+	// Off the path, an instruction becomes `unreachable`, except for the blocks, ifs and their ends,
+	// which keep every label in place.
+	def rewriteOffPath(bi: BytecodeIterator) -> StraightLineAction {
+		match (bi.current()) {
+			// need to keep the control structures in place for block types/branch targets
+			BLOCK, LOOP, IF, ELSE, END => return StraightLineAction.KEPT;
+			// otherwise, set the instruction as unreachable 
+			// (for multi-byte instructions, the first is unreachable and the remaining is nop)
+			_ => {
+				replace(bi.pc, bi.nextPc(), Opcode.UNREACHABLE);
+				return StraightLineAction.OFF_PATH;
+			}
+		}
+	}
+	// A branch the path takes is kept. One it falls through is replaced by what falling through does
+	// to the stack, which is consuming the condition or narrowing the tested value.
+	def rewriteOnPath(bi: BytecodeIterator, e: PathProfilingEdge) -> StraightLineAction {
+		def op = bi.current();
+		def pc = bi.pc;
+		def end = bi.nextPc();
+
+		match (op) {
+			BR_IF => {
+				// is the path along the taken edge of the br_if?
+				if (e == e.source.outgoing[1]) {
+					// if it is, keep it
+					// - although this should really be a value-consuming unconditional branch
+					// - or a GUARD instruction
+					return StraightLineAction.KEPT;
+				} else {
+					// if not, drop the value to fall-through
+					replace(pc, end, Opcode.DROP);
+					return StraightLineAction.REPLACED;
+				}
+			}
+			BR_ON_NULL => {
+				if (e == e.source.outgoing[1]) {
+					return StraightLineAction.KEPT;
+				} else {
+					replace(pc, end, Opcode.REF_AS_NON_NULL);
+					return StraightLineAction.REPLACED;
+				}
+			}
+			BR_ON_NON_NULL => {
+				if (e == e.source.outgoing[1]) {
+					return StraightLineAction.KEPT;
+				} else {
+					replace(pc, end, Opcode.DROP);
+					return StraightLineAction.REPLACED;
+				}
+			}
+			BR_ON_CAST, BR_ON_CAST_FAIL => {
+				// TODO support these instructions
+				err.abs(0).set("uses branch on cast instructions");
+				return StraightLineAction.KEPT;
+			}
+			_ => return StraightLineAction.KEPT;
+		}
+	}
+	// Writes the one-byte {op} over the instruction at [pc, end) and fills the rest of it with `nop`.
+	private def replace(pc: int, end: int, op: Opcode) {
+		code[pc] = byte.!(op.code);
+		nops(pc + 1, end);
+	}
+	// Fills [pc, end) of the copy with `nop`.
+	private def nops(pc: int, end: int) {
+		for (j = pc; j < end; j++) code[j] = byte.!(Opcode.NOP.code);
+	}
+	def onFinish(i: Instance, r: Result) {
+		if (copy == null) return;
+		out.beginColor(Color.FUNC).put1("straight-lining %q", orig.render(module.names, _)).endColors().ln();
+		printListing(orig, actions);
+		out.beginColor(Color.FUNC).puts("result").endColors().ln();
+		printListing(copy, null);
+	}
+	// Lists {f}, marking what became of each instruction according to {acts}, or all kept if null.
+	def printListing(f: FuncDecl, acts: Array<StraightLineAction>) {
+		def p = CfgPrinter.new();
+		def entries = p.compute(module, f);
+		var act = StraightLineAction.KEPT;
+		for (j < entries.length) {
+			def e = entries[j];
+			// a continuation line carries no pc of its own, so it stays with the row above it
+			if (acts != null && e.pc >= 0) act = acts[e.pc];
+			out.beginColor(COLORS[act.tag]).sp();
+			e.render(p.lmax, p.rmax, out);
+			if (e.pc >= 0) out.puts(NOTES[act.tag]);
+			out.endColors().ln();
+		}
+	}
+}
+
+// What became of the instruction at a given pc. An instruction in a block off the path is OFF_PATH,
+// unless it is a block, loop, if, else or end, which is KEPT.
+enum StraightLineAction { OFF_PATH, KEPT, REMOVED, REPLACED }
+def COLORS = [Color.INACTIVE, Color.COVERED, Color.INACTIVE, Color.MEDIUM];
+def NOTES = ["unreachable, block not on path", "", "removed", "replaced"];
+
