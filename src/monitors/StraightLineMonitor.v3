@@ -7,17 +7,23 @@ def E = MonitorRegistry.add(
 
 def func_opt = E.options.newIntOption("func", -1, "index of the function to straight-line");
 def path_opt = E.options.newIntOption("path", -1, "number of the path to straight-line, as path-profile numbers it");
+def compact_opt = E.options.newFlag("compact", null, "leave out code off the path and make taken branches unconditional, instead of keeping every pc");
 
-// Emits a copy of one function specialized to a single path through it. Code off the path becomes
-// `unreachable` and branches the path falls through are removed, so the copy computes the right
-// answer only for inputs that would have followed that path.
+// Emits a copy of one function specialized to a single path through it, so the copy computes the
+// right answer only for inputs that would have followed that path. By default the copy keeps every
+// pc, with code off the path made `unreachable` and branches the path falls through removed. With
+// {compact}, code off the path is left out, ifs become blocks and taken branches unconditional.
 class StraightLineMonitor extends Monitor {
 	def var module: Module;
 	def var orig: FuncDecl;
 	def var copy: FuncDecl; // the straight-lined copy, once it has validated
 	// in the future, this would be stored in the FuncDecl as a map from path number to straightlined pc
 	def var actions: Array<StraightLineAction>; // what became of the instruction at each pc
-	def var code: Array<byte>; // the copy's bytecode, rewritten in place
+	def var code: Array<byte>; // the copy's bytecode
+	def open = ArrayStack<bool>.new(); // for each enclosing block, loop or if, whether its opener was emitted
+	// used only with {compact}
+	def buf = WasmAsm.new(); // the copy's bytecode as it is emitted
+	def var new_pc: Array<int>; // the copy's pc for each original pc, or -1 if nothing was emitted for it
 	def var err: ErrorGen;
 
 	def onParse(m: Module, err: ErrorGen) {
@@ -70,14 +76,22 @@ class StraightLineMonitor extends Monitor {
 		}
 		return profile.pathEdges(k);
 	}
-	// Copies the function and rewrites it in place, so every instruction keeps its pc and every label
-	// stays where it was. Reports through {err} if the path goes through an instruction that is not
-	// supported.
+	// Emits the copy, either rewriting it in place or, with {compact}, appending it to {buf}. Both keep
+	// every block and loop the path enters, so that branch depths do not change. Reports through {err}
+	// if the path goes through an instruction that is not supported.
 	def straightline(f: FuncDecl, path: Array<PathProfilingEdge>) {
-		code = Arrays.dup(f.orig_bytecode);
-		actions = Array<StraightLineAction>.new(code.length);
+		def compact = compact_opt.val;
+		actions = Array<StraightLineAction>.new(f.orig_bytecode.length);
 		def bi = BytecodeIterator.new().reset(f);
 		bi.current(); // skip the local declarations
+		open.clear();
+		if (compact) {
+			new_pc = Array<int>.new(f.orig_bytecode.length);
+			buf.resize(0);
+			buf.putr(f.orig_bytecode[0 ... bi.pc]);
+		} else {
+			code = Arrays.dup(f.orig_bytecode);
+		}
 
 		// for each block, as the source of its edge on the path (ENTRY's edge is skipped)
 		for (e in path[1 ...]) {
@@ -85,30 +99,53 @@ class StraightLineMonitor extends Monitor {
 
 			// for all instructions before this block starts
 			while (bi.pc < b.bind_pos) {
-				actions[bi.pc] = rewriteOffPath(bi);
+				actions[bi.pc] = if(compact, emitOffPath(bi), rewriteOffPath(bi));
 				bi.next();
 			}
 
 			// for all instructions inside this block
 			while (bi.pc < b.end) {
-				actions[bi.pc] = rewriteOnPath(bi, e);
+				actions[bi.pc] = if(compact, emitOnPath(bi, e), rewriteOnPath(bi, e));
 				if (err.error()) return;
 				bi.next();
 			}
 		}
 		// deal with any remaining code that is not on the path
 		while (bi.more()) {
-			actions[bi.pc] = rewriteOffPath(bi);
+			actions[bi.pc] = if(compact, emitOffPath(bi), rewriteOffPath(bi));
 			bi.next();
 		}
+		if (compact) code = buf.extract();
 	}
-	// Off the path, an instruction becomes `unreachable`, except for the blocks, ifs and their ends,
-	// which keep every label in place.
+	// Off the path, an instruction becomes `unreachable`, except for the `else` and `end` of a structure
+	// whose opener is kept, which keep every label in place.
 	def rewriteOffPath(bi: BytecodeIterator) -> StraightLineAction {
 		match (bi.current()) {
-			// need to keep the control structures in place for block types/branch targets
-			BLOCK, LOOP, IF, ELSE, END => return StraightLineAction.KEPT;
-			// otherwise, set the instruction as unreachable 
+			// do not keep blocks that start off the path
+			BLOCK, LOOP, IF => {
+				open.push(false);
+				nops(bi.pc, bi.nextPc());
+				return StraightLineAction.REMOVED;
+			}
+			// keep else instruction only its corresponding if is on the path
+			ELSE => {
+				if (open.peek()) {
+					return StraightLineAction.KEPT;
+				} else {
+					nops(bi.pc, bi.nextPc());
+					return StraightLineAction.REMOVED;
+				}
+			}
+			// keep end instruction only if its corresponding if/block/loop is on the path
+			END => {
+				if (open.empty() || open.pop()) {
+					return StraightLineAction.KEPT;
+				} else {
+					nops(bi.pc, bi.nextPc());
+					return StraightLineAction.REMOVED;
+				}
+			}
+			// otherwise, set the instruction as unreachable
 			// (for multi-byte instructions, the first is unreachable and the remaining is nop)
 			_ => {
 				replace(bi.pc, bi.nextPc(), Opcode.UNREACHABLE);
@@ -124,6 +161,15 @@ class StraightLineMonitor extends Monitor {
 		def end = bi.nextPc();
 
 		match (op) {
+			BLOCK, LOOP, IF => {
+				open.push(true);  // always keep else/end
+				return StraightLineAction.KEPT;
+			}
+			END => {
+				// check for function end and always keep
+				if (!open.empty()) open.pop();
+				return StraightLineAction.KEPT;
+			}
 			BR_IF => {
 				// is the path along the taken edge of the br_if?
 				if (e == e.source.outgoing[1]) {
@@ -170,33 +216,164 @@ class StraightLineMonitor extends Monitor {
 	private def nops(pc: int, end: int) {
 		for (j = pc; j < end; j++) code[j] = byte.!(Opcode.NOP.code);
 	}
+	// Off the path, nothing is emitted except the `end` of a structure whose opener was, since the
+	// path left that structure by a branch or return. What follows it is never reached.
+	def emitOffPath(bi: BytecodeIterator) -> StraightLineAction {
+		def pc = bi.pc;
+		new_pc[pc] = -1;
+		match (bi.current()) {
+			BLOCK, LOOP, IF => 
+				// do not emit this and its corresponding else/end
+				open.push(false);
+			END => {
+				// check for function end and always keep it
+				if (open.empty()) {
+					new_pc[pc] = buf.length;
+					buf.end();
+					return StraightLineAction.KEPT;
+				}
+				// otherwise, if the block/loop/if is kept, keep the end
+				if (open.pop()) {
+					new_pc[pc] = buf.length;
+					buf.end();
+					buf.unreachable();
+					return StraightLineAction.KEPT;
+				}
+			}
+			_ => ;
+		}
+		return StraightLineAction.OFF_PATH;
+	}
+	// On the path, an `if` becomes a block holding just the arm the path takes, a branch the path
+	// takes becomes unconditional, and one it falls through leaves only its effect on the stack.
+	def emitOnPath(bi: BytecodeIterator, e: PathProfilingEdge) -> StraightLineAction {
+		def op = bi.current();
+		def pc = bi.pc;
+		def end = bi.nextPc();
+		// {outgoing} is [fallthrough, taken] for a two-way branch, the order the profiler's probes rely on.
+		def outgoing = e.source.outgoing;
+		new_pc[pc] = buf.length;
+
+		match (op) {
+			BLOCK, LOOP => {
+				// copy block instruction and type and mark its end as should-be-kept
+				open.push(true);
+				buf.putr(orig.orig_bytecode[pc ... end]);
+				return StraightLineAction.KEPT;
+			}
+			IF => {
+				// turn a if into a block, dropping its argument, but keeping its type
+				open.push(true);
+				buf.drop();
+				buf.put(byte.!(Opcode.BLOCK.code));
+				buf.putr(orig.orig_bytecode[pc + 1 ... end]);
+				return StraightLineAction.REPLACED;
+			}
+			// this is the end of the true branch of `if` so this is removed
+			ELSE => {
+				new_pc[pc] = -1;
+				return StraightLineAction.REMOVED;
+			}
+			END => {
+				// check for function end
+				if (!open.empty()) open.pop();
+				// on-path end implies the block that started it was on path
+				buf.end();
+				return StraightLineAction.KEPT;
+			}
+			BR_IF => {
+				// consume test value
+				buf.drop();
+				// if br_if supposed to be taken, replace with `br`
+				if (e == outgoing[1]) buf.br(int.!(bi.immptr().read_uleb32()));
+				return StraightLineAction.REPLACED;
+			}
+			BR_TABLE => {
+				def labels = bi.immptr().read_labels();
+				// find taken label in path
+				var k = labels.length - 1;
+				for (j < outgoing.length) {
+					if (outgoing[j] == e) break;
+					k--;
+				}
+				// drop value and replace with unconditional branch
+				buf.drop();
+				buf.br(labels[k]);
+				return StraightLineAction.REPLACED;
+			}
+			BR_ON_NULL => {
+				if (e == outgoing[1]) {
+					buf.drop();
+					buf.br(int.!(bi.immptr().read_uleb32()));
+				} else {
+					buf.ref_as_non_null();
+				}
+				return StraightLineAction.REPLACED;
+			}
+			BR_ON_NON_NULL => {
+				if (e == outgoing[1]) {
+					buf.ref_as_non_null();
+					buf.br(int.!(bi.immptr().read_uleb32()));
+				} else {
+					buf.drop();
+				}
+				return StraightLineAction.REPLACED;
+			}
+			BR_ON_CAST, BR_ON_CAST_FAIL => {
+				// TODO support these instructions
+				err.abs(0).set("uses branch on cast instructions");
+				return StraightLineAction.KEPT;
+			}
+			_ => {
+				buf.putr(orig.orig_bytecode[pc ... end]);
+				return StraightLineAction.KEPT;
+			}
+		}
+	}
 	def onFinish(i: Instance, r: Result) {
 		if (copy == null) return;
 		out.beginColor(Color.FUNC).put1("straight-lining %q", orig.render(module.names, _)).endColors().ln();
-		printListing(orig, actions);
+		printListing(orig, actions, null);
 		out.beginColor(Color.FUNC).puts("result").endColors().ln();
-		printListing(copy, null);
+		// in place, every instruction of the copy is at its original pc already
+		def from = if(compact_opt.val, origPcs());
+		// in place, the copy's pcs are the original's, so it can be marked with the same actions
+		def acts = if(!compact_opt.val, actions);
+		printListing(copy, acts, from);
 	}
-	// Lists {f}, marking what became of each instruction according to {acts}, or all kept if null.
-	def printListing(f: FuncDecl, acts: Array<StraightLineAction>) {
+	// Returns the original pc that each instruction of the copy was emitted for, or 0 if none.
+	def origPcs() -> Array<int> {
+		def from = Array<int>.new(code.length);
+		for (pc < new_pc.length) {
+			if (new_pc[pc] > 0) from[new_pc[pc]] = pc;
+		}
+		return from;
+	}
+	// Lists {f}, marking what became of each instruction according to {acts}, or all kept if null,
+	// and the original pc of each instruction according to {from}, if not null.
+	def printListing(f: FuncDecl, acts: Array<StraightLineAction>, from: Array<int>) {
 		def p = CfgPrinter.new();
 		def entries = p.compute(module, f);
 		var act = StraightLineAction.KEPT;
 		for (j < entries.length) {
 			def e = entries[j];
-			// a continuation line carries no pc of its own, so it stays with the row above it
-			if (acts != null && e.pc >= 0) act = acts[e.pc];
+			// a continuation line, or padding inside an instruction rewritten in place, has no action
+			// of its own, so it stays with the row above it
+			def own = acts != null && e.pc >= 0 && acts[e.pc] != StraightLineAction.NONE;
+			if (own) act = acts[e.pc];
 			out.beginColor(COLORS[act.tag]).sp();
 			e.render(p.lmax, p.rmax, out);
-			if (e.pc >= 0) out.puts(NOTES[act.tag]);
+			if (own) out.puts(NOTES[act.tag]);
+			if (from != null && e.pc >= 0 && from[e.pc] > 0) out.put1("from +%d", from[e.pc]);
 			out.endColors().ln();
 		}
 	}
 }
 
-// What became of the instruction at a given pc. An instruction in a block off the path is OFF_PATH,
-// unless it is a block, loop, if, else or end, which is KEPT.
-enum StraightLineAction { OFF_PATH, KEPT, REMOVED, REPLACED }
-def COLORS = [Color.INACTIVE, Color.COVERED, Color.INACTIVE, Color.MEDIUM];
-def NOTES = ["unreachable, block not on path", "", "removed", "replaced"];
+// What became of the instruction at a given pc. NONE marks a pc that starts no instruction. An
+// instruction in a block off the path is OFF_PATH, unless it is a block, loop, if, else or end
+// that the copy keeps, which is KEPT.
+enum StraightLineAction { NONE, OFF_PATH, KEPT, REMOVED, REPLACED }
+def COLORS = [Color.COVERED, Color.INACTIVE, Color.COVERED, Color.INACTIVE, Color.MEDIUM];
+def NOTES = ["", "block not on path", "", "removed", "replaced"];
 
