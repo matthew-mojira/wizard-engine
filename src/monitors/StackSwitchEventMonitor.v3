@@ -19,7 +19,7 @@ def STACK_SWITCH_OPCODES = [
 ];
 
 // One executed transfer. The fields below are filled in when control lands.
-class TransferEvent(site: TransferSite, gap: u64, start: u64) {
+class TransferEvent(site: TransferSite, start: u64) {
 	var dest_func = -1;
 	var dest_pc = -1;
 	var cycles: u64;
@@ -56,11 +56,9 @@ class ContSiteStats(func_index: int, pc: int, op: Opcode) {
 // overridden {fire}, which would drop the events this site records.
 class TransferProbe(monitor: StackSwitchEventMonitor, site_stats: TransferSiteStats) extends Probe {
 	def fire(dynamicLoc: DynamicLoc) -> ProbeAction {
-		// The global GapProbe fires first and has already counted this op instruction, thus {gap - 1}.
-		var e = TransferEvent.new(site_stats.site, monitor.gap - 1, Target.rdtsc());
+		var e = TransferEvent.new(site_stats.site, Target.rdtsc());
 		monitor.stats.events.put(e);
 		site_stats.count++;
-		monitor.gap = 0;
 		monitor.pending = e; // the next instruction executed is this transfer's destination
 		monitor.pending_stats = site_stats;
 		return ProbeAction.Continue;
@@ -88,7 +86,7 @@ class ContNewProbe(stats: TransferStats) extends Probe {
 // Static layout for the event table. Shared by the text and CSV renderers.
 def eventTable = initEventTable();
 def initEventTable() -> TraceTable {
-	var t = TraceTable.new(["#", "Function", "PC", "Opcode", "Tag", "ToFunction", "ToPC", "Cycles", "Gap"]);
+	var t = TraceTable.new(["#", "Function", "PC", "Opcode", "Tag", "ToFunction", "ToPC", "Cycles"]);
 	t.cells[0].set(6,  Justification.RIGHT, Color.NONE);
 	t.cells[1].set(10, Justification.RIGHT, Color.FUNC);
 	t.cells[2].set(6,  Justification.RIGHT, Color.LINE);
@@ -97,34 +95,45 @@ def initEventTable() -> TraceTable {
 	t.cells[5].set(11, Justification.RIGHT, Color.FUNC);
 	t.cells[6].set(6,  Justification.RIGHT, Color.LINE);
 	t.cells[7].set(9,  Justification.RIGHT, Color.COUNT);
-	t.cells[8].set(9,  Justification.RIGHT, Color.COUNT);
 	return t;
 }
 
-// Counts {gap} and records where a pending transfer landed.
-class GapProbe(monitor: StackSwitchEventMonitor) extends Probe {
+// Placed at every point where a transfer can land, so it records where a pending transfer landed.
+class LandingProbe(monitor: StackSwitchEventMonitor) extends Probe {
 	def fire(dynamicLoc: DynamicLoc) -> ProbeAction {
-		monitor.gap++;
-		// {pending} is the last transfer whose destination and cycles are not yet recorded.
-		if (monitor.pending != null) {
-			def e = monitor.pending;
-			monitor.pending = null;
-			e.cycles = Target.rdtsc() - e.start;
-			e.dest_func = dynamicLoc.func.decl.func_index;
-			e.dest_pc = dynamicLoc.pc;
-			monitor.pending_stats.recordDest(e.dest_func, e.dest_pc);
-		}
+		monitor.land(dynamicLoc);
 		return ProbeAction.Continue;
 	}
 }
 
 // Installs a {TransferProbe} at each suspend, switch and resume-family opcode, and a
-// {ContCountProbe} at each cont.new and cont.bind.
+// {ContCountProbe} at each cont.new and cont.bind. Also installs a {LandingProbe} at every
+// point where a transfer can land.
 class EventSiteVisitor extends BytecodeInstrumenter {
 	def monitor: StackSwitchEventMonitor;
 	def stats = monitor.stats;
+	def landing = LandingProbe.new(monitor);
 
 	new(monitor, module: Module) super(module) { }
+
+	// A fresh continuation starts at the entry of its function. Only a function that can be
+	// referenced can become a continuation.
+	def onFunc(func: FuncDecl) {
+		if (func.reffed) Instrumentation.insertFuncEntryProbe(module, func.func_index, landing);
+		// An exception thrown into a continuation lands at whichever try_table catch handles it.
+		for (e in func.handlers.ex_handlers) {
+			match (e.info) {
+				Sidetable(push_exnref, sidetable_entry) => insertLanding(func, func.sidetable.getCatchEntry(sidetable_entry).handler_pc);
+				_ => ;
+			}
+		}
+	}
+	// Inserts {landing} at {pc} of {func}, unless it is already there.
+	def insertLanding(func: FuncDecl, pc: int) {
+		if (Instrumentation.getLocalProbe(module, func.func_index, pc) != landing) {
+			Instrumentation.insertLocalProbe(module, func.func_index, pc, landing);
+		}
+	}
 
 	// for a suspend, switch, or resume instruction
 	// - increments its static counts (for its opcode and its function)
@@ -136,6 +145,9 @@ class EventSiteVisitor extends BytecodeInstrumenter {
 		def site_stats = TransferSiteStats.new(TransferSite.new(bi.func.func_index, bi.pc, op, tag));
 		stats.transfer_sites.put(site_stats);
 		insertProbeHere(TransferProbe.new(monitor, site_stats));
+		// A suspended stack is later resumed at the next instruction, and a resumed continuation
+		// that returns also lands there.
+		insertLanding(bi.func, bi.nextPc());
 	}
 	// Adds a traced site and tallies the handler clauses the resume site installs.
 	def addResume(op: Opcode, tag: int, handlers: Range<SuspensionHandler>) {
@@ -147,6 +159,12 @@ class EventSiteVisitor extends BytecodeInstrumenter {
 				Suspend(tag_index, depth) => stats.clause_on[tag_index] += 1;
 				Switch(tag_index) => stats.clause_switch[tag_index] += 1;
 			}
+		}
+		// A suspend handled by this resume lands at the clause's handler. The suspend clauses come
+		// first in the resume site's handler table.
+		def table = bi.func.handlers.resume_sites[bi.pc];
+		for (i < ResumeSites.header(table).switch_start_index) {
+			insertLanding(bi.func, ResumeSites.entry(table, i).handler_pc);
 		}
 	}
 	// Adds a count-only site for an opcode that is not traced.
@@ -225,17 +243,22 @@ class TransferStats {
 class StackSwitchEventMonitor extends Monitor {
 	def stats = TransferStats.new();
 	def count_probes = Vector<ContCountProbe>.new();
-	var gap: u64; // Num. instructions executed since the last stack-switching op.
 	var pending: TransferEvent; // set by a site that just transferred; the next instruction is its destination.
 	var pending_stats: TransferSiteStats; // the stats of the site that set {pending}
-	var globalProbeRegistered: bool;
 
 	def onParse(m: Module, err: ErrorGen) {
 		stats.sizeFor(m);
 		EventSiteVisitor.new(this, m).run();
-		if (!globalProbeRegistered) {
-			Instrumentation.insertGlobalProbe(GapProbe.new(this));
-			globalProbeRegistered = true;
+	}
+	// Records {dynamicLoc} as the destination of the pending transfer, if there is one.
+	def land(dynamicLoc: DynamicLoc) {
+		// {pending} is the last transfer whose destination and cycles are not yet recorded.
+		if (pending != null) {
+			pending.cycles = Target.rdtsc() - pending.start;
+			pending.dest_func = dynamicLoc.func.decl.func_index;
+			pending.dest_pc = dynamicLoc.pc;
+			pending_stats.recordDest(pending.dest_func, pending.dest_pc);
+			pending = null;
 		}
 	}
 
@@ -250,7 +273,6 @@ class StackSwitchEventMonitor extends Monitor {
 		// This runs once per instantiation, per --repeat iteration and per spectest invoke, so
 		// a transfer left dangling here must not be resolved by the next run's first instruction.
 		pending = null;
-		gap = 0;
 	}
 }
 
@@ -448,7 +470,6 @@ def fillRow(i: int, e: TransferEvent) {
 	eventTable.cells[5].putd(e.dest_func); // -1 if control never landed
 	eventTable.cells[6].putd(e.dest_pc);
 	eventTable.cells[7].putd(e.cycles);
-	eventTable.cells[8].putd(e.gap);
 }
 
 def reportText(out: TraceBuilder, stats: TransferStats) {
