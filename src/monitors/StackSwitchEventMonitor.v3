@@ -19,7 +19,7 @@ def STACK_SWITCH_OPCODES = [
 ];
 
 // One executed transfer. The fields below are filled in when control lands.
-class TransferEvent(site: TransferSite, start: u64) {
+class TransferEvent(site: TransferSite, gap: u64, start: u64) {
 	var dest_func = -1;
 	var dest_pc = -1;
 	var cycles: u64;
@@ -56,9 +56,11 @@ class ContSiteStats(func_index: int, pc: int, op: Opcode) {
 // overridden {fire}, which would drop the events this site records.
 class TransferProbe(monitor: StackSwitchEventMonitor, site_stats: TransferSiteStats) extends Probe {
 	def fire(dynamicLoc: DynamicLoc) -> ProbeAction {
-		var e = TransferEvent.new(site_stats.site, Target.rdtsc());
+		// {gap} already counts this op instruction, thus {gap - 1}.
+		var e = TransferEvent.new(site_stats.site, monitor.gap.count - 1, Target.rdtsc());
 		monitor.stats.events.put(e);
 		site_stats.count++;
+		monitor.gap.count = 0;
 		monitor.pending = e; // the next instruction executed is this transfer's destination
 		monitor.pending_stats = site_stats;
 		return ProbeAction.Continue;
@@ -86,7 +88,7 @@ class ContNewProbe(stats: TransferStats) extends Probe {
 // Static layout for the event table. Shared by the text and CSV renderers.
 def eventTable = initEventTable();
 def initEventTable() -> TraceTable {
-	var t = TraceTable.new(["#", "Function", "PC", "Opcode", "Tag", "ToFunction", "ToPC", "Cycles"]);
+	var t = TraceTable.new(["#", "Function", "PC", "Opcode", "Tag", "ToFunction", "ToPC", "Cycles", "Gap"]);
 	t.cells[0].set(6,  Justification.RIGHT, Color.NONE);
 	t.cells[1].set(10, Justification.RIGHT, Color.FUNC);
 	t.cells[2].set(6,  Justification.RIGHT, Color.LINE);
@@ -95,6 +97,7 @@ def initEventTable() -> TraceTable {
 	t.cells[5].set(11, Justification.RIGHT, Color.FUNC);
 	t.cells[6].set(6,  Justification.RIGHT, Color.LINE);
 	t.cells[7].set(9,  Justification.RIGHT, Color.COUNT);
+	t.cells[8].set(9,  Justification.RIGHT, Color.COUNT);
 	return t;
 }
 
@@ -108,11 +111,13 @@ class LandingProbe(monitor: StackSwitchEventMonitor) extends Probe {
 
 // Installs a {TransferProbe} at each suspend, switch and resume-family opcode, and a
 // {ContCountProbe} at each cont.new and cont.bind. Also installs a {LandingProbe} at every
-// point where a transfer can land.
+// point where a transfer can land, and a {CountMoreProbe} at the start of every basic block
+// that adds the block's length to {gap}.
 class EventSiteVisitor extends BytecodeInstrumenter {
 	def monitor: StackSwitchEventMonitor;
 	def stats = monitor.stats;
 	def landing = LandingProbe.new(monitor);
+	def blocks = BasicBlockIterator.new();
 
 	new(monitor, module: Module) super(module) { }
 
@@ -126,6 +131,21 @@ class EventSiteVisitor extends BytecodeInstrumenter {
 				Sidetable(push_exnref, sidetable_entry) => insertLanding(func, func.sidetable.getCatchEntry(sidetable_entry).handler_pc);
 				_ => ;
 			}
+		}
+		// Adds each basic block's length to {gap} when the block starts.
+		bi.reset(func);
+		blocks.reset(func);
+		while (blocks.more()) {
+			def block = blocks.current();
+			var length = 0uL;
+			bi.at(block.0, -1).current();
+			while (bi.more() && bi.pc < block.1) {
+				length++;
+				bi.next();
+			}
+			def probe = CountMoreProbe.new(monitor.gap, length);
+			Instrumentation.insertLocalProbe(module, func.func_index, block.0, probe);
+			blocks.next();
 		}
 	}
 	// Inserts {landing} at {pc} of {func}, unless it is already there.
@@ -243,6 +263,7 @@ class TransferStats {
 class StackSwitchEventMonitor extends Monitor {
 	def stats = TransferStats.new();
 	def count_probes = Vector<ContCountProbe>.new();
+	def gap = CountProbe.new(); // Num. instructions executed since the last stack-switching op.
 	var pending: TransferEvent; // set by a site that just transferred; the next instruction is its destination.
 	var pending_stats: TransferSiteStats; // the stats of the site that set {pending}
 
@@ -273,6 +294,7 @@ class StackSwitchEventMonitor extends Monitor {
 		// This runs once per instantiation, per --repeat iteration and per spectest invoke, so
 		// a transfer left dangling here must not be resolved by the next run's first instruction.
 		pending = null;
+		gap.count = 0;
 	}
 }
 
@@ -470,6 +492,7 @@ def fillRow(i: int, e: TransferEvent) {
 	eventTable.cells[5].putd(e.dest_func); // -1 if control never landed
 	eventTable.cells[6].putd(e.dest_pc);
 	eventTable.cells[7].putd(e.cycles);
+	eventTable.cells[8].putd(e.gap);
 }
 
 def reportText(out: TraceBuilder, stats: TransferStats) {

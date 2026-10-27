@@ -52,7 +52,18 @@ class BasicBlockIterator {
 				BR_ON_CAST,
 				BR_ON_CAST_FAIL,
 				BR_ON_NULL,
-				BR_ON_NON_NULL => {
+				BR_ON_NON_NULL,
+				CALL,
+				CALL_INDIRECT,
+				CALL_REF,
+				RETURN_CALL,
+				RETURN_CALL_INDIRECT,
+				RETURN_CALL_REF,
+				SUSPEND,
+				SWITCH,
+				RESUME,
+				RESUME_THROW,
+				RESUME_THROW_REF => {
 					// End the current block after this instruction.
 					return void(bi.next());
 				}
@@ -60,7 +71,5 @@ class BasicBlockIterator {
 			}
 			bi.next();
 		}
-		// fell off the end, no more blocks.
-		pc = bi.pc;
 	}
 }
