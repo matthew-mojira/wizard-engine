@@ -19,32 +19,24 @@ def STACK_SWITCH_OPCODES = [
 ];
 
 // One executed transfer. The fields below are filled in when control lands.
-class TransferEvent(site: TransferSite, gap: u64, start: u64) {
+class TransferEvent(site: TransferSite, gap: u64) {
 	var dest_func = -1;
 	var dest_pc = -1;
-	var cycles: u64;
 	var live: int; // stacks created by {cont.new} that are live after this event
 }
 
 // One stack created by {cont.new}, from its creation until it returns or is unwound. {created} and
 // {ended} are the numbers of events executed by then.
 class StackLife(func_index: int, created: int) extends StackMonitorData {
-	def start = Target.rdtsc();
 	var ended = -1;
 	var how = StackEnd.LIVE;
 	var resumes: u64;
 	var suspends: u64;
-	var cycles: u64;
 
 	// Ends this life as {how} after {ended} events.
 	def end(ended: int, how: StackEnd) {
 		this.ended = ended;
 		this.how = how;
-		cycles = Target.rdtsc() - start;
-	}
-	// Returns the cycles this stack lived, up to {now} if it is still live.
-	def lived(now: u64) -> u64 {
-		return if(how == StackEnd.LIVE, now - start, cycles);
 	}
 }
 
@@ -86,8 +78,7 @@ class ContSiteStats(func_index: int, pc: int, op: Opcode) {
 // overridden {fire}, which would drop the events this site records.
 class TransferProbe(monitor: StackSwitchEventMonitor, site_stats: TransferSiteStats) extends Probe {
 	def fire(dynamicLoc: DynamicLoc) -> ProbeAction {
-		def start = Target.rdtsc();
-		def e = monitor.addEvent(site_stats, start);
+		def e = monitor.addEvent(site_stats);
 
 		// Counts the suspend and the resume of the stacks that this transfer switches between.
 		def op = site_stats.site.op;
@@ -184,8 +175,8 @@ class ReturnProbe(monitor: StackSwitchEventMonitor, site_stats: TransferSiteStat
 			monitor.running = cur;
 		}
 
-		// Adds a return event from this site. The cycles of a return are not measured.
-		def e = monitor.addEvent(site_stats, 0);
+		// Adds a return event from this site.
+		def e = monitor.addEvent(site_stats);
 
 		// Ends the record of the returned stack as RETURNED.
 		monitor.end(returned, StackEnd.RETURNED);
@@ -199,7 +190,7 @@ class ReturnProbe(monitor: StackSwitchEventMonitor, site_stats: TransferSiteStat
 // Static layout for the event table. Shared by the text and CSV renderers.
 def eventTable = initEventTable();
 def initEventTable() -> TraceTable {
-	var t = TraceTable.new(["#", "Function", "PC", "Opcode", "Tag", "ToFunction", "ToPC", "Cycles", "Gap", "Live"]);
+	var t = TraceTable.new(["#", "Function", "PC", "Opcode", "Tag", "ToFunction", "ToPC", "Gap", "Live"]);
 	t.cells[0].set(6,  Justification.RIGHT, Color.NONE);
 	t.cells[1].set(10, Justification.RIGHT, Color.FUNC);
 	t.cells[2].set(6,  Justification.RIGHT, Color.LINE);
@@ -208,8 +199,7 @@ def initEventTable() -> TraceTable {
 	t.cells[5].set(11, Justification.RIGHT, Color.FUNC);
 	t.cells[6].set(6,  Justification.RIGHT, Color.LINE);
 	t.cells[7].set(9,  Justification.RIGHT, Color.COUNT);
-	t.cells[8].set(9,  Justification.RIGHT, Color.COUNT);
-	t.cells[9].set(6,  Justification.RIGHT, Color.COUNT);
+	t.cells[8].set(6,  Justification.RIGHT, Color.COUNT);
 	return t;
 }
 
@@ -426,7 +416,7 @@ class StackSwitchEventMonitor extends Monitor {
 		// XXX keeps {running} while a host function re-enters Wasm (does not support stack switches there)
 		if (unwind(running, cur) || pending != null) running = cur;
 
-		// {pending} is the last transfer whose destination and cycles are not yet recorded.
+		// {pending} is the last transfer whose destination is not yet recorded.
 		if (pending != null) {
 			def op = pending.site.op;
 			if (op == Opcode.RESUME_THROW || op == Opcode.RESUME_THROW_REF) {
@@ -441,15 +431,14 @@ class StackSwitchEventMonitor extends Monitor {
 			// 	// outside it.
 			// 	end(resumed, StackEnd.UNWOUND);
 			// }
-			pending.cycles = Target.rdtsc() - pending.start;
 			setDest(pending, pending_stats, dynamicLoc);
 			pending = null;
 		}
 	}
-	// Adds an event for {site_stats} that started at {start}, and resets {gap} for the next event.
-	def addEvent(site_stats: TransferSiteStats, start: u64) -> TransferEvent {
+	// Adds an event for {site_stats} and resets {gap} for the next event.
+	def addEvent(site_stats: TransferSiteStats) -> TransferEvent {
 		// {gap} already counts this op instruction, thus {gap - 1}.
-		def e = TransferEvent.new(site_stats.site, gap.count - 1, start);
+		def e = TransferEvent.new(site_stats.site, gap.count - 1);
 		stats.events.put(e);
 		site_stats.count++;
 		gap.count = 0;
@@ -699,14 +688,13 @@ def fillRow(i: int, e: TransferEvent) {
 	eventTable.cells[4].putd(s.tag);     // -1 when the opcode names no tag
 	eventTable.cells[5].putd(e.dest_func); // -1 if control never landed
 	eventTable.cells[6].putd(e.dest_pc);
-	eventTable.cells[7].putd(e.cycles);
-	eventTable.cells[8].putd(e.gap);
-	eventTable.cells[9].putd(e.live);
+	eventTable.cells[7].putd(e.gap);
+	eventTable.cells[8].putd(e.live);
 }
 
 def lifeTable = initLifeTable();
 def initLifeTable() -> TraceTable {
-	def t = TraceTable.new(["#", "Function", "Created", "Ended", "How", "Resumes", "Suspends", "Cycles"]);
+	def t = TraceTable.new(["#", "Function", "Created", "Ended", "How", "Resumes", "Suspends"]);
 	t.cells[0].set(6,  Justification.RIGHT, Color.NONE);
 	t.cells[1].set(10, Justification.RIGHT, Color.FUNC);
 	t.cells[2].set(8,  Justification.RIGHT, Color.COUNT);
@@ -714,17 +702,15 @@ def initLifeTable() -> TraceTable {
 	t.cells[4].set(9,  Justification.LEFT,  Color.NONE);
 	t.cells[5].set(8,  Justification.RIGHT, Color.COUNT);
 	t.cells[6].set(9,  Justification.RIGHT, Color.COUNT);
-	t.cells[7].set(10, Justification.RIGHT, Color.COUNT);
 	return t;
 }
 
 // Reports each stack created by {cont.new}: the events executed when it was created and when it
-// ended, how it ended, how often it was resumed and suspended, and how long it lived.
+// ended, how it ended, and how often it was resumed and suspended.
 def reportStacks(out: TraceBuilder, stats: TransferStats) {
 	if (stats.stacks.length == 0) return;
 	out.ln().beginColor(Color.UNDERLINE).puts("ssevent: stack lifetimes").endColors().ln();
 	lifeTable.putTableHeader(out);
-	def now = Target.rdtsc();
 	def C = lifeTable.cells;
 	for (i < stats.stacks.length) {
 		def life = stats.stacks[i];
@@ -735,7 +721,6 @@ def reportStacks(out: TraceBuilder, stats: TransferStats) {
 		C[4].puts(life.how.name);
 		C[5].putd(life.resumes);
 		C[6].putd(life.suspends);
-		C[7].putd(life.lived(now));
 		lifeTable.putTableRow(out);
 	}
 	out.flush();
