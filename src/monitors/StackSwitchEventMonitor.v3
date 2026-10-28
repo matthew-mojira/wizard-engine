@@ -23,6 +23,36 @@ class TransferEvent(site: TransferSite, gap: u64, start: u64) {
 	var dest_func = -1;
 	var dest_pc = -1;
 	var cycles: u64;
+	var live: int; // stacks created by {cont.new} that are live after this event
+}
+
+// One stack created by {cont.new}, from its creation until it returns or is unwound. {created} and
+// {ended} are the numbers of events executed by then.
+class StackLife(func_index: int, created: int) extends StackMonitorData {
+	def start = Target.rdtsc();
+	var ended = -1;
+	var how = StackEnd.LIVE;
+	var resumes: u64;
+	var suspends: u64;
+	var cycles: u64;
+
+	// Ends this life as {how} after {ended} events.
+	def end(ended: int, how: StackEnd) {
+		this.ended = ended;
+		this.how = how;
+		cycles = Target.rdtsc() - start;
+	}
+	// Returns the cycles this stack lived, up to {now} if it is still live.
+	def lived(now: u64) -> u64 {
+		return if(how == StackEnd.LIVE, now - start, cycles);
+	}
+}
+
+// How a stack created by {cont.new} ended, or LIVE if it has not.
+enum StackEnd {
+	LIVE,
+	RETURNED,
+	UNWOUND
 }
 
 // A stack-switching site: its static fields are constant for a given program-counter.
@@ -56,11 +86,28 @@ class ContSiteStats(func_index: int, pc: int, op: Opcode) {
 // overridden {fire}, which would drop the events this site records.
 class TransferProbe(monitor: StackSwitchEventMonitor, site_stats: TransferSiteStats) extends Probe {
 	def fire(dynamicLoc: DynamicLoc) -> ProbeAction {
-		// {gap} already counts this op instruction, thus {gap - 1}.
-		var e = TransferEvent.new(site_stats.site, monitor.gap.count - 1, Target.rdtsc());
-		monitor.stats.events.put(e);
-		site_stats.count++;
-		monitor.gap.count = 0;
+		def start = Target.rdtsc();
+		def e = monitor.addEvent(site_stats, start);
+
+		// Counts the suspend and the resume of the stacks that this transfer switches between.
+		def op = site_stats.site.op;
+		monitor.running = Target.curStack();
+		if (op == Opcode.SUSPEND || op == Opcode.SWITCH) {
+			def life = monitor.find(monitor.running);
+			if (life != null) life.suspends++;
+		}
+		if (op != Opcode.SUSPEND) {
+			// The continuation to resume or switch to is on top of the operand stack.
+			match (dynamicLoc.frame.getFrameAccessor().getTopOfStack()) {
+				Cont(c) => {
+					monitor.resumed = c.stack;
+					def life = monitor.find(c.stack);
+					if (life != null) life.resumes++;
+				}
+				_ => ;
+			}
+		}
+		e.live = monitor.live;
 		monitor.pending = e; // the next instruction executed is this transfer's destination
 		monitor.pending_stats = site_stats;
 		return ProbeAction.Continue;
@@ -71,16 +118,80 @@ class TransferProbe(monitor: StackSwitchEventMonitor, site_stats: TransferSiteSt
 // can intrinsify it.
 class ContCountProbe(site_stats: ContSiteStats) extends CountProbe { }
 
-// Records the function that an executed {cont.new} turns into a continuation, read from the
-// funcref on top of the operand stack.
-class ContNewProbe(stats: TransferStats) extends Probe {
+// Placed after each {cont.new}, where the new continuation is on top of the operand stack. Starts
+// the life of the stack that the {cont.new} created and counts the function it was created from.
+class CreateProbe(monitor: StackSwitchEventMonitor) extends Probe {
 	def fire(dynamicLoc: DynamicLoc) -> ProbeAction {
-		var v = dynamicLoc.frame.getFrameAccessor().getTopOfStack();
-		match (Value.Ref.!(v).val) {
-			// XXX func_index from the defining module (does not support imported functions)
-			x: WasmFunction => stats.cont_funcs[x.decl.func_index] += 1;
+		// get top of stack
+		match (dynamicLoc.frame.getFrameAccessor().getTopOfStack()) {
+			Cont(c) => {
+				// Skips a null continuation, which a branch to this instruction can carry.
+				if (Continuations.isNull(c)) return ProbeAction.Continue;
+
+				// if the stack already has a StackLife attached to it, skip
+				if (c.stack.monitor_data != null) return ProbeAction.Continue;
+
+				// get the actual function for the continuation
+				def func = c.stack.startFunc();
+				def func_index = if(WasmFunction.?(func), WasmFunction.!(func).decl.func_index, -1);
+				def created = monitor.stats.events.length; // current event number
+
+				// Counts the continuation created from {func_index}.
+				// XXX func_index from the defining module (does not support imported functions)
+				if (func_index >= 0) monitor.stats.cont_funcs[func_index] += 1;
+
+				// create the new StackLife
+				def life = StackLife.new(func_index, created);
+				monitor.stats.stacks.put(life);
+
+				// set up stack's monitor data
+				c.stack.monitor_data = life;
+				monitor.live++;
+			}
 			_ => ;
 		}
+		return ProbeAction.Continue;
+	}
+}
+
+// Placed after each resume-family site, where a child that returns lands. Records a return event
+// if a child returned here.
+class ReturnProbe(monitor: StackSwitchEventMonitor, site_stats: TransferSiteStats) extends Probe {
+	def fire(dynamicLoc: DynamicLoc) -> ProbeAction {
+		def cur = Target.curStack();
+		var returned: WasmStack;
+
+		// are we in the middle of a stack switch?
+		if (monitor.pending != null) {
+			// XXX host function considerations
+			// // Only a continuation of a host function returns before a Wasm instruction runs in it.
+			// def site = monitor.pending_stats.site;
+			// // Skips a {pending} set by a site other than this resume, such as a suspend whose handler is here.
+			// if (site.func_index != site_stats.site.func_index || site.pc != site_stats.site.pc) return ProbeAction.Continue;
+			// returned = monitor.resumed;
+			// // It returned, so {land} must not end it as a host continuation that threw.
+			// monitor.resumed = null;
+			// monitor.land(dynamicLoc);
+
+			// Leaves the pending transfer for the {LandingProbe} at this instruction to close.
+			return ProbeAction.Continue;
+		} else {
+			// A branch or a caught exception also reaches this instruction.
+			if (monitor.running == null || monitor.reaches(monitor.running, cur)) return ProbeAction.Continue;
+
+			// Takes {running} as the stack that returned and sets {running} to the current stack.
+			returned = monitor.running;
+			monitor.running = cur;
+		}
+
+		// Adds a return event from this site. The cycles of a return are not measured.
+		def e = monitor.addEvent(site_stats, 0);
+
+		// Ends the record of the returned stack as RETURNED.
+		monitor.end(returned, StackEnd.RETURNED);
+
+		// Records this instruction as the destination of the return and saves {live} in the event.
+		monitor.setDest(e, site_stats, dynamicLoc);
 		return ProbeAction.Continue;
 	}
 }
@@ -88,7 +199,7 @@ class ContNewProbe(stats: TransferStats) extends Probe {
 // Static layout for the event table. Shared by the text and CSV renderers.
 def eventTable = initEventTable();
 def initEventTable() -> TraceTable {
-	var t = TraceTable.new(["#", "Function", "PC", "Opcode", "Tag", "ToFunction", "ToPC", "Cycles", "Gap"]);
+	var t = TraceTable.new(["#", "Function", "PC", "Opcode", "Tag", "ToFunction", "ToPC", "Cycles", "Gap", "Live"]);
 	t.cells[0].set(6,  Justification.RIGHT, Color.NONE);
 	t.cells[1].set(10, Justification.RIGHT, Color.FUNC);
 	t.cells[2].set(6,  Justification.RIGHT, Color.LINE);
@@ -98,6 +209,7 @@ def initEventTable() -> TraceTable {
 	t.cells[6].set(6,  Justification.RIGHT, Color.LINE);
 	t.cells[7].set(9,  Justification.RIGHT, Color.COUNT);
 	t.cells[8].set(9,  Justification.RIGHT, Color.COUNT);
+	t.cells[9].set(6,  Justification.RIGHT, Color.COUNT);
 	return t;
 }
 
@@ -111,40 +223,66 @@ class LandingProbe(monitor: StackSwitchEventMonitor) extends Probe {
 
 // Installs a {TransferProbe} at each suspend, switch and resume-family opcode, and a
 // {ContCountProbe} at each cont.new and cont.bind. Also installs a {LandingProbe} at every
-// point where a transfer can land, and a {CountMoreProbe} at the start of every basic block
-// that adds the block's length to {gap}.
+// point where a transfer can land, and a {CountMoreProbe} at the last instruction of every basic
+// block that adds the block's length to {gap}. A {ReturnProbe} follows each resume-family site and
+// a {CreateProbe} follows each cont.new.
 class EventSiteVisitor extends BytecodeInstrumenter {
 	def monitor: StackSwitchEventMonitor;
 	def stats = monitor.stats;
 	def landing = LandingProbe.new(monitor);
+	def creation = CreateProbe.new(monitor);
 	def blocks = BasicBlockIterator.new();
 
-	new(monitor, module: Module) super(module) { }
+	// A call or a stack switch can run other code before the rest of its block, so it ends the block.
+	new(monitor, module: Module) super(module) {
+		blocks.end_at_calls = true;
+	}
 
 	// A fresh continuation starts at the entry of its function. Only a function that can be
 	// referenced can become a continuation.
 	def onFunc(func: FuncDecl) {
+		// A child returns to the instruction after the resume site that resumed it. These probes are
+		// inserted first, so they fire before the other probes there.
+		def sites = func.handlers.resume_sites;
+		if (sites != null) {
+			bi.reset(func);
+			for (pc < sites.length) {
+				if (sites[pc] == null) continue;
+				bi.at(pc, -1).current();
+				def site = TransferSite.new(func.func_index, pc, Opcode.RETURN, -1);
+				def site_stats = TransferSiteStats.new(site);
+				stats.transfer_sites.put(site_stats);
+				def next = bi.nextPc();
+				def probe = ReturnProbe.new(monitor, site_stats);
+				Instrumentation.insertLocalProbe(module, func.func_index, next, probe);
+			}
+		}
 		if (func.reffed) Instrumentation.insertFuncEntryProbe(module, func.func_index, landing);
 		// An exception thrown into a continuation lands at whichever try_table catch handles it.
 		for (e in func.handlers.ex_handlers) {
 			match (e.info) {
-				Sidetable(push_exnref, sidetable_entry) => insertLanding(func, func.sidetable.getCatchEntry(sidetable_entry).handler_pc);
+				Sidetable(push_exnref, sidetable_entry) => {
+					def pc = func.sidetable.getCatchEntry(sidetable_entry).handler_pc;
+					insertLanding(func, pc);
+				}
 				_ => ;
 			}
 		}
-		// Adds each basic block's length to {gap} when the block starts.
+		// Adds each basic block's length to {gap} at the block's last instruction.
 		bi.reset(func);
 		blocks.reset(func);
 		while (blocks.more()) {
 			def block = blocks.current();
 			var length = 0uL;
+			var last = block.0;
 			bi.at(block.0, -1).current();
 			while (bi.more() && bi.pc < block.1) {
 				length++;
+				last = bi.pc;
 				bi.next();
 			}
 			def probe = CountMoreProbe.new(monitor.gap, length);
-			Instrumentation.insertLocalProbe(module, func.func_index, block.0, probe);
+			Instrumentation.insertLocalProbe(module, func.func_index, last, probe);
 			blocks.next();
 		}
 	}
@@ -167,7 +305,8 @@ class EventSiteVisitor extends BytecodeInstrumenter {
 		insertProbeHere(TransferProbe.new(monitor, site_stats));
 		// A suspended stack is later resumed at the next instruction, and a resumed continuation
 		// that returns also lands there.
-		insertLanding(bi.func, bi.nextPc());
+		def next = bi.nextPc();
+		insertLanding(bi.func, next);
 	}
 	// Adds a traced site and tallies the handler clauses the resume site installs.
 	def addResume(op: Opcode, tag: int, handlers: Range<SuspensionHandler>) {
@@ -184,7 +323,8 @@ class EventSiteVisitor extends BytecodeInstrumenter {
 		// first in the resume site's handler table.
 		def table = bi.func.handlers.resume_sites[bi.pc];
 		for (i < ResumeSites.header(table).switch_start_index) {
-			insertLanding(bi.func, ResumeSites.entry(table, i).handler_pc);
+			def pc = ResumeSites.entry(table, i).handler_pc;
+			insertLanding(bi.func, pc);
 		}
 	}
 	// Adds a count-only site for an opcode that is not traced.
@@ -200,7 +340,8 @@ class EventSiteVisitor extends BytecodeInstrumenter {
 
 	def visit_CONT_NEW(cont: u31) {
 		count(Opcode.CONT_NEW);
-		insertProbeHere(ContNewProbe.new(stats));
+		def next = bi.nextPc();
+		Instrumentation.insertLocalProbe(module, bi.func.func_index, next, creation);
 	}
 	def visit_CONT_BIND(in_cont: u31, out_cont: u31) { count(Opcode.CONT_BIND); }
 	def visit_SUSPEND(tag: u31) { add(Opcode.SUSPEND, int.view(tag)); }
@@ -220,6 +361,7 @@ class TransferStats {
 	def clause_switch = Vector<u64>.new();	// resume sites with an (on $tag switch) clause
 	def cont_funcs = Vector<u64>.new();	// continuations created from each function by {cont.new}
 	def func_sites = Vector<u64>.new();	// stack-switching instructions in each function
+	def stacks = Vector<StackLife>.new();	// every stack created by {cont.new}, in creation order
 	var module: Module;	// for rendering function names
 
 	// Sets size for the per-function and per-tag vvectors for {module}.
@@ -264,23 +406,86 @@ class StackSwitchEventMonitor extends Monitor {
 	def stats = TransferStats.new();
 	def count_probes = Vector<ContCountProbe>.new();
 	def gap = CountProbe.new(); // Num. instructions executed since the last stack-switching op.
-	var pending: TransferEvent; // set by a site that just transferred; the next instruction is its destination.
-	var pending_stats: TransferSiteStats; // the stats of the site that set {pending}
+	var pending: TransferEvent; // the event of the last suspend, switch or resume whose destination is not yet recorded
+	var pending_stats: TransferSiteStats; // the site stats of {pending}
+	var live: int; // the number of stacks created by {cont.new} that have not returned or been unwound
+	var running: WasmStack; // the current stack as of the last transfer, return or landing
+	var resumed: WasmStack; // the stack that the last resume or switch transferred to
 
 	def onParse(m: Module, err: ErrorGen) {
 		stats.sizeFor(m);
 		EventSiteVisitor.new(this, m).run();
 	}
 	// Records {dynamicLoc} as the destination of the pending transfer, if there is one.
+	// Also ends the stacks that an exception unwound to get here.
 	def land(dynamicLoc: DynamicLoc) {
+		def cur = Target.curStack();
+
+		// An exception thrown on the running stack unwinds the stacks up to the one that catches it.
+		// The landing of a transfer also changes the running stack.
+		// XXX keeps {running} while a host function re-enters Wasm (does not support stack switches there)
+		if (unwind(running, cur) || pending != null) running = cur;
+
 		// {pending} is the last transfer whose destination and cycles are not yet recorded.
 		if (pending != null) {
+			def op = pending.site.op;
+			if (op == Opcode.RESUME_THROW || op == Opcode.RESUME_THROW_REF) {
+				// An exception thrown into a continuation unwinds its stacks above the one that catches
+				// it, or all of them.
+				if (!unwind(resumed, cur)) unwind(resumed, null);
+			}
+
+			// XXX host function considerations
+			// else if (op == Opcode.RESUME && cur != resumed) {
+			// 	// A continuation of a host function that throws never runs, and the exception lands
+			// 	// outside it.
+			// 	end(resumed, StackEnd.UNWOUND);
+			// }
 			pending.cycles = Target.rdtsc() - pending.start;
-			pending.dest_func = dynamicLoc.func.decl.func_index;
-			pending.dest_pc = dynamicLoc.pc;
-			pending_stats.recordDest(pending.dest_func, pending.dest_pc);
+			setDest(pending, pending_stats, dynamicLoc);
 			pending = null;
 		}
+	}
+	// Adds an event for {site_stats} that started at {start}, and resets {gap} for the next event.
+	def addEvent(site_stats: TransferSiteStats, start: u64) -> TransferEvent {
+		// {gap} already counts this op instruction, thus {gap - 1}.
+		def e = TransferEvent.new(site_stats.site, gap.count - 1, start);
+		stats.events.put(e);
+		site_stats.count++;
+		gap.count = 0;
+		return e;
+	}
+	// Records {dynamicLoc} as the destination of {e} from {site_stats} and saves {live} in {e}.
+	def setDest(e: TransferEvent, site_stats: TransferSiteStats, dynamicLoc: DynamicLoc) {
+		e.dest_func = dynamicLoc.func.decl.func_index;
+		e.dest_pc = dynamicLoc.pc;
+		e.live = live;
+		site_stats.recordDest(e.dest_func, e.dest_pc);
+	}
+	// Returns the life of {stack}, or null if it is not a live stack created by {cont.new}.
+	def find(stack: WasmStack) -> StackLife {
+		if (stack == null) return null;
+		def life = StackLife.!(stack.monitor_data);
+		return if(life != null && life.how == StackEnd.LIVE, life);
+	}
+	// Ends the life of {stack} as {how}, if it is live.
+	def end(stack: WasmStack, how: StackEnd) {
+		def life = find(stack);
+		if (life == null) return;
+		life.end(stats.events.length, how);
+		live--;
+	}
+	// Returns true if {to} is {from} or one of its parents.
+	def reaches(from: WasmStack, to: WasmStack) -> bool {
+		var s = from;
+		while (s != null && s != to) s = s.parent;
+		return s == to;
+	}
+	// Ends {from} and its parents below {to}, if {to} is {from} or one of its parents.
+	def unwind(from: WasmStack, to: WasmStack) -> bool {
+		if (!reaches(from, to)) return false;
+		for (s = from; s != to; s = s.parent) end(s, StackEnd.UNWOUND);
+		return true;
 	}
 
 	def onFinish(i: Instance, r: Result) {
@@ -293,8 +498,11 @@ class StackSwitchEventMonitor extends Monitor {
 		else reportText(out, stats);
 		// This runs once per instantiation, per --repeat iteration and per spectest invoke, so
 		// a transfer left dangling here must not be resolved by the next run's first instruction.
-		pending = null;
+		// XXX trap considerations
+		// pending = null;
 		gap.count = 0;
+		running = null;
+		resumed = null;
 	}
 }
 
@@ -493,6 +701,73 @@ def fillRow(i: int, e: TransferEvent) {
 	eventTable.cells[6].putd(e.dest_pc);
 	eventTable.cells[7].putd(e.cycles);
 	eventTable.cells[8].putd(e.gap);
+	eventTable.cells[9].putd(e.live);
+}
+
+def lifeTable = initLifeTable();
+def initLifeTable() -> TraceTable {
+	def t = TraceTable.new(["#", "Function", "Created", "Ended", "How", "Resumes", "Suspends", "Cycles"]);
+	t.cells[0].set(6,  Justification.RIGHT, Color.NONE);
+	t.cells[1].set(10, Justification.RIGHT, Color.FUNC);
+	t.cells[2].set(8,  Justification.RIGHT, Color.COUNT);
+	t.cells[3].set(8,  Justification.RIGHT, Color.COUNT);
+	t.cells[4].set(9,  Justification.LEFT,  Color.NONE);
+	t.cells[5].set(8,  Justification.RIGHT, Color.COUNT);
+	t.cells[6].set(9,  Justification.RIGHT, Color.COUNT);
+	t.cells[7].set(10, Justification.RIGHT, Color.COUNT);
+	return t;
+}
+
+// Reports each stack created by {cont.new}: the events executed when it was created and when it
+// ended, how it ended, how often it was resumed and suspended, and how long it lived.
+def reportStacks(out: TraceBuilder, stats: TransferStats) {
+	if (stats.stacks.length == 0) return;
+	out.ln().beginColor(Color.UNDERLINE).puts("ssevent: stack lifetimes").endColors().ln();
+	lifeTable.putTableHeader(out);
+	def now = Target.rdtsc();
+	def C = lifeTable.cells;
+	for (i < stats.stacks.length) {
+		def life = stats.stacks[i];
+		C[0].putd(i + 1);
+		C[1].putd(life.func_index);
+		C[2].putd(life.created);
+		C[3].putd(life.ended); // -1 if the stack is still live
+		C[4].puts(life.how.name);
+		C[5].putd(life.resumes);
+		C[6].putd(life.suspends);
+		C[7].putd(life.lived(now));
+		lifeTable.putTableRow(out);
+	}
+	out.flush();
+}
+
+def resumeTable = initResumeTable();
+def initResumeTable() -> TraceTable {
+	def t = TraceTable.new(["Resumes", "Stacks"]);
+	t.cells[0].set(8, Justification.RIGHT, Color.COUNT);
+	t.cells[1].set(8, Justification.RIGHT, Color.COUNT);
+	return t;
+}
+
+// Reports how many stacks were resumed each number of times.
+def reportResumes(out: TraceBuilder, stats: TransferStats) {
+	def n = stats.stacks.length;
+	if (n == 0) return;
+	def resumes = Array<u64>.new(n);
+	for (i < n) resumes[i] = stats.stacks[i].resumes;
+	def sorted = Arrays.sort(resumes, 0, n, u64.<);
+	out.ln().beginColor(Color.UNDERLINE).puts("ssevent: stacks by number of resumes").endColors().ln();
+	resumeTable.putTableHeader(out);
+	var i = 0;
+	while (i < n) {
+		var j = i;
+		while (j < n && sorted[j] == sorted[i]) j++;
+		resumeTable.cells[0].putd(sorted[i]);
+		resumeTable.cells[1].putd(j - i);
+		resumeTable.putTableRow(out);
+		i = j;
+	}
+	out.flush();
 }
 
 def reportText(out: TraceBuilder, stats: TransferStats) {
@@ -503,6 +778,8 @@ def reportText(out: TraceBuilder, stats: TransferStats) {
 	reportTags(out, stats);
 	reportFuncs(out, stats);
 	reportDests(out, stats);
+	reportStacks(out, stats);
+	reportResumes(out, stats);
 	out.ln().beginColor(Color.UNDERLINE).puts("ssevent: stack-switching event trace").endColors().ln();
 	if (events.length == 0) {
 		out.puts("  (no stack-switching events were executed)").ln();
