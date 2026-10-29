@@ -23,6 +23,10 @@ class TransferEvent(site: TransferSite, gap: u64) {
 	var dest_func = -1;
 	var dest_pc = -1;
 	var live: int; // stacks created by {cont.new} that are live after this event
+	var bytes: u64; // bytes of values and frames on the stack that executed this transfer
+	var values: int; // locals and operands on the stack that executed this transfer
+	var frames: int; // frames on the stack that executed this transfer
+	var chain: int; // stacks from the stack that executed this transfer up through its parents
 }
 
 // One stack created by {cont.new}, from its creation until it returns or is unwound. {created} and
@@ -32,6 +36,8 @@ class StackLife(func_index: int, created: int) extends StackMonitorData {
 	var how = StackEnd.LIVE;
 	var resumes: u64;
 	var suspends: u64;
+	var max_bytes: u64; // the largest {TransferEvent.bytes} of the transfers this stack executed
+	var max_frames: int; // the largest {TransferEvent.frames} of the transfers this stack executed
 
 	// Ends this life as {how} after {ended} events.
 	def end(ended: int, how: StackEnd) {
@@ -80,25 +86,38 @@ class TransferProbe(monitor: StackSwitchEventMonitor, site_stats: TransferSiteSt
 	def fire(dynamicLoc: DynamicLoc) -> ProbeAction {
 		def e = monitor.addEvent(site_stats);
 
-		// Counts the suspend and the resume of the stacks that this transfer switches between.
+		// Counts the resume of the stacks that this transfer resumes. {land} counts the suspend.
 		def op = site_stats.site.op;
 		monitor.running = Target.curStack();
-		if (op == Opcode.SUSPEND || op == Opcode.SWITCH) {
-			def life = monitor.find(monitor.running);
-			if (life != null) life.suspends++;
-		}
 		if (op != Opcode.SUSPEND) {
 			// The continuation to resume or switch to is on top of the operand stack.
 			match (dynamicLoc.frame.getFrameAccessor().getTopOfStack()) {
 				Cont(c) => {
 					monitor.resumed = c.stack;
-					def life = monitor.find(c.stack);
-					if (life != null) life.resumes++;
+					// Resuming a continuation resumes its top stack and the parents below it.
+					for (s = c.stack; s != null; s = s.parent) {
+						def life = monitor.find(s);
+						if (life != null) life.resumes++;
+					}
 				}
 				_ => ;
 			}
 		}
-		e.live = monitor.live;
+
+		// Records the bytes, values, frames and parent chain of the stack that executes this transfer.
+		def stack = monitor.running;
+		def accessor = dynamicLoc.frame.getFrameAccessor();
+		e.bytes = stack.usedBytes();
+		e.values = stack.numValues();
+		e.frames = accessor.depth() + 1;
+		for (s = stack; s != null; s = s.parent) e.chain++;
+
+		// Raises the largest bytes and frames in the record of that stack.
+		def life = monitor.find(stack);
+		if (life != null) {
+			if (e.bytes > life.max_bytes) life.max_bytes = e.bytes;
+			if (e.frames > life.max_frames) life.max_frames = e.frames;
+		}
 		monitor.pending = e; // the next instruction executed is this transfer's destination
 		monitor.pending_stats = site_stats;
 		return ProbeAction.Continue;
@@ -190,7 +209,8 @@ class ReturnProbe(monitor: StackSwitchEventMonitor, site_stats: TransferSiteStat
 // Static layout for the event table. Shared by the text and CSV renderers.
 def eventTable = initEventTable();
 def initEventTable() -> TraceTable {
-	var t = TraceTable.new(["#", "Function", "PC", "Opcode", "Tag", "ToFunction", "ToPC", "Gap", "Live"]);
+	var t = TraceTable.new(["#", "Function", "PC", "Opcode", "Tag", "ToFunction", "ToPC", "Gap", "Live",
+		"Bytes", "Values", "Frames", "Chain"]);
 	t.cells[0].set(6,  Justification.RIGHT, Color.NONE);
 	t.cells[1].set(10, Justification.RIGHT, Color.FUNC);
 	t.cells[2].set(6,  Justification.RIGHT, Color.LINE);
@@ -200,6 +220,10 @@ def initEventTable() -> TraceTable {
 	t.cells[6].set(6,  Justification.RIGHT, Color.LINE);
 	t.cells[7].set(9,  Justification.RIGHT, Color.COUNT);
 	t.cells[8].set(6,  Justification.RIGHT, Color.COUNT);
+	t.cells[9].set(9,  Justification.RIGHT, Color.COUNT);
+	t.cells[10].set(7, Justification.RIGHT, Color.COUNT);
+	t.cells[11].set(7, Justification.RIGHT, Color.COUNT);
+	t.cells[12].set(6, Justification.RIGHT, Color.COUNT);
 	return t;
 }
 
@@ -410,6 +434,7 @@ class StackSwitchEventMonitor extends Monitor {
 	// Also ends the stacks that an exception unwound to get here.
 	def land(dynamicLoc: DynamicLoc) {
 		def cur = Target.curStack();
+		def from = running;
 
 		// An exception thrown on the running stack unwinds the stacks up to the one that catches it.
 		// The landing of a transfer also changes the running stack.
@@ -419,6 +444,14 @@ class StackSwitchEventMonitor extends Monitor {
 		// {pending} is the last transfer whose destination is not yet recorded.
 		if (pending != null) {
 			def op = pending.site.op;
+			if (op == Opcode.SUSPEND || op == Opcode.SWITCH) {
+				// A suspend or switch suspends the stack that executed it and its parents up to the
+				// handler, which are now detached from {cur}.
+				for (s = from; s != null; s = s.parent) {
+					def life = find(s);
+					if (life != null) life.suspends++;
+				}
+			}
 			if (op == Opcode.RESUME_THROW || op == Opcode.RESUME_THROW_REF) {
 				// An exception thrown into a continuation unwinds its stacks above the one that catches
 				// it, or all of them.
@@ -690,11 +723,16 @@ def fillRow(i: int, e: TransferEvent) {
 	eventTable.cells[6].putd(e.dest_pc);
 	eventTable.cells[7].putd(e.gap);
 	eventTable.cells[8].putd(e.live);
+	eventTable.cells[9].putd(e.bytes); // 0 for a return
+	eventTable.cells[10].putd(e.values);
+	eventTable.cells[11].putd(e.frames);
+	eventTable.cells[12].putd(e.chain);
 }
 
 def lifeTable = initLifeTable();
 def initLifeTable() -> TraceTable {
-	def t = TraceTable.new(["#", "Function", "Created", "Ended", "How", "Resumes", "Suspends"]);
+	def t = TraceTable.new(["#", "Function", "Created", "Ended", "How", "Resumes", "Suspends",
+		"MaxBytes", "MaxFrames"]);
 	t.cells[0].set(6,  Justification.RIGHT, Color.NONE);
 	t.cells[1].set(10, Justification.RIGHT, Color.FUNC);
 	t.cells[2].set(8,  Justification.RIGHT, Color.COUNT);
@@ -702,11 +740,14 @@ def initLifeTable() -> TraceTable {
 	t.cells[4].set(9,  Justification.LEFT,  Color.NONE);
 	t.cells[5].set(8,  Justification.RIGHT, Color.COUNT);
 	t.cells[6].set(9,  Justification.RIGHT, Color.COUNT);
+	t.cells[7].set(10, Justification.RIGHT, Color.COUNT);
+	t.cells[8].set(10, Justification.RIGHT, Color.COUNT);
 	return t;
 }
 
 // Reports each stack created by {cont.new}: the events executed when it was created and when it
-// ended, how it ended, and how often it was resumed and suspended.
+// ended, how it ended, how often it was resumed and suspended, and its largest bytes and frames at
+// the transfers it executed.
 def reportStacks(out: TraceBuilder, stats: TransferStats) {
 	if (stats.stacks.length == 0) return;
 	out.ln().beginColor(Color.UNDERLINE).puts("ssevent: stack lifetimes").endColors().ln();
@@ -721,6 +762,8 @@ def reportStacks(out: TraceBuilder, stats: TransferStats) {
 		C[4].puts(life.how.name);
 		C[5].putd(life.resumes);
 		C[6].putd(life.suspends);
+		C[7].putd(life.max_bytes);
+		C[8].putd(life.max_frames);
 		lifeTable.putTableRow(out);
 	}
 	out.flush();
@@ -740,16 +783,40 @@ def reportResumes(out: TraceBuilder, stats: TransferStats) {
 	if (n == 0) return;
 	def resumes = Array<u64>.new(n);
 	for (i < n) resumes[i] = stats.stacks[i].resumes;
-	def sorted = Arrays.sort(resumes, 0, n, u64.<);
 	out.ln().beginColor(Color.UNDERLINE).puts("ssevent: stacks by number of resumes").endColors().ln();
-	resumeTable.putTableHeader(out);
+	putHistogram(out, resumeTable, resumes);
+}
+
+def sizeTable = initSizeTable();
+def initSizeTable() -> TraceTable {
+	def t = TraceTable.new(["MaxBytes", "Stacks"]);
+	t.cells[0].set(10, Justification.RIGHT, Color.COUNT);
+	t.cells[1].set(8, Justification.RIGHT, Color.COUNT);
+	return t;
+}
+
+// Reports how many stacks had each largest size in bytes.
+def reportSizes(out: TraceBuilder, stats: TransferStats) {
+	def n = stats.stacks.length;
+	if (n == 0) return;
+	def sizes = Array<u64>.new(n);
+	for (i < n) sizes[i] = stats.stacks[i].max_bytes;
+	out.ln().beginColor(Color.UNDERLINE).puts("ssevent: stacks by largest size").endColors().ln();
+	putHistogram(out, sizeTable, sizes);
+}
+
+// Sorts {values} and puts one row in {table} per distinct value, with the number of times it occurs.
+def putHistogram(out: TraceBuilder, table: TraceTable, values: Array<u64>) {
+	def n = values.length;
+	def sorted = Arrays.sort(values, 0, n, u64.<);
+	table.putTableHeader(out);
 	var i = 0;
 	while (i < n) {
 		var j = i;
 		while (j < n && sorted[j] == sorted[i]) j++;
-		resumeTable.cells[0].putd(sorted[i]);
-		resumeTable.cells[1].putd(j - i);
-		resumeTable.putTableRow(out);
+		table.cells[0].putd(sorted[i]);
+		table.cells[1].putd(j - i);
+		table.putTableRow(out);
 		i = j;
 	}
 	out.flush();
@@ -765,6 +832,7 @@ def reportText(out: TraceBuilder, stats: TransferStats) {
 	reportDests(out, stats);
 	reportStacks(out, stats);
 	reportResumes(out, stats);
+	reportSizes(out, stats);
 	out.ln().beginColor(Color.UNDERLINE).puts("ssevent: stack-switching event trace").endColors().ln();
 	if (events.length == 0) {
 		out.puts("  (no stack-switching events were executed)").ln();
