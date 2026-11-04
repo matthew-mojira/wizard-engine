@@ -1,0 +1,52 @@
+// Copyright 2026 Wizard Authors. All rights reserved.
+// See LICENSE for details of Apache 2.0 license.
+
+// Host module "ffi" for the folklore-to-fact ffi_* benchmarks. Supplies the
+// trivial foreign functions the Go ports import (//go:wasmimport ffi <name>, see
+// programs/ffi/*/go/host_wasip1.go) so fib's recursion crosses the Wasm<->host
+// boundary. Matches the same "ffi" module supplied by goLoader.mjs (v8) and the
+// wasmtime runner, so a Go ffi_* module runs identically on all three engines.
+def X_ = HostModuleBuilder.new("ffi")
+	.func("zero", SigCache.v_i, FFI_ZERO)
+	.func("one", SigCache.v_i, FFI_ONE)
+	.func("two", SigCache.v_i, FFI_TWO)
+	.func("sin", SigCache.d_d, FFI_SIN)
+	.func("tan", SigCache.d_d, FFI_TAN)
+	.func("abs", SigCache.d_d, FFI_ABS)
+	.register(true); // exposed, so the linker resolves "ffi" imports without a CLI flag
+
+def FFI_ZERO(args: Range<Value>) -> HostResult { return HostResult.Value1(Values.box_i(0)); }
+def FFI_ONE(args: Range<Value>) -> HostResult { return HostResult.Value1(Values.box_i(1)); }
+def FFI_TWO(args: Range<Value>) -> HostResult { return HostResult.Value1(Values.box_i(2)); }
+
+def FFI_SIN(args: Range<Value>) -> HostResult {
+	return HostResult.Value1(Values.box_d(sin0(Values.unbox_d(args[0]))));
+}
+def FFI_TAN(args: Range<Value>) -> HostResult {
+	var x = Values.unbox_d(args[0]);
+	return HostResult.Value1(Values.box_d(sin0(x) / sin0(x + HALF_PI))); // tan = sin/cos
+}
+def FFI_ABS(args: Range<Value>) -> HostResult {
+	var x = Values.unbox_d(args[0]);
+	return HostResult.Value1(Values.box_d(if(x < 0.0, 0.0 - x, x)));
+}
+
+def PI = 3.141592653589793;
+def TWO_PI = 6.283185307179586;
+def HALF_PI = 1.5707963267948966;
+
+// sin via argument reduction to [-PI/2, PI/2] followed by an 11th-order Taylor
+// series. Accurate well within the benchmark's epsilon (1e-3) for the inputs it
+// uses (sin at PI, cos/tan at PI/4), and general enough for any argument.
+def sin0(x: double) -> double {
+	var k = int.truncd(x / TWO_PI);
+	var kf: double = k;
+	var y = x - kf * TWO_PI;              // y in (-TWO_PI, TWO_PI)
+	if (y > PI) y = y - TWO_PI;
+	if (y < (0.0 - PI)) y = y + TWO_PI;   // y in [-PI, PI]
+	if (y > HALF_PI) y = PI - y;
+	if (y < (0.0 - HALF_PI)) y = (0.0 - PI) - y; // y in [-PI/2, PI/2]
+	var y2 = y * y;
+	return y * (1.0 - y2 * (1.0 / 6.0 - y2 * (1.0 / 120.0
+		- y2 * (1.0 / 5040.0 - y2 * (1.0 / 362880.0 - y2 * (1.0 / 39916800.0))))));
+}
