@@ -2496,6 +2496,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		bindHandler(Opcode.RESUME); {
 			var cont_id = xenv.tmp0;
 			saveResumeIVars();
+			genMaterializeTopCont();
 			genReadUleb32(G(cont_id)); // read signature index
 
 			var contStack = xenv.tmp1;
@@ -2914,9 +2915,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		// generate code for runtime calls with 1 LEB that cannot trap.
 		for (t in [
 			(Opcode.MEMORY_GROW, refRuntimeCall(RT.MEMORY_GROW)),
-			(Opcode.TABLE_GROW, refRuntimeCall(RT.TABLE_GROW)),
-			(Opcode.STRUCT_NEW, refRuntimeCall(RT.STRUCT_NEW)),
-			(Opcode.STRUCT_NEW_DEFAULT, refRuntimeCall(RT.STRUCT_NEW_DEFAULT))
+			(Opcode.TABLE_GROW, refRuntimeCall(RT.TABLE_GROW))
 		]) {
 			bindHandler(t.0);
 			genReadUleb32(r_tmp0);
@@ -2933,6 +2932,8 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 			(Opcode.TABLE_SET, refRuntimeCall(RT.TABLE_SET)),
 			(Opcode.MEMORY_FILL, refRuntimeCall(RT.MEMORY_FILL)),
 			(Opcode.TABLE_FILL, refRuntimeCall(RT.TABLE_FILL)),
+			(Opcode.STRUCT_NEW, refRuntimeCall(RT.STRUCT_NEW)),
+			(Opcode.STRUCT_NEW_DEFAULT, refRuntimeCall(RT.STRUCT_NEW_DEFAULT)),
 			(Opcode.ARRAY_NEW, refRuntimeCall(RT.ARRAY_NEW)),
 			(Opcode.ARRAY_NEW_DEFAULT, refRuntimeCall(RT.ARRAY_NEW_DEFAULT)),
 			(Opcode.ARRAY_GET, refRuntimeCall(RT.ARRAY_GET)),
@@ -4156,6 +4157,18 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		asm.movq_r_m(t, r_func_decl.plus(offsets.FuncDecl_handlers));
 		asm.movq_r_m(t, t.plus(offsets.FuncHandlerInfo_resume_sites));
 		masm.emit_v3_Array_elem_r_rr(ValueKind.REF, r_tmp, r_tmp, xenv.curpc);
+	}
+	private def genMaterializeTopCont() {
+		var done = X86_64Label.new();
+		asm.movq_r_m(r_tmp1, vsph[-1].value);		// %tmp1 = cont.stack
+		asm.q.cmp_r_i(r_tmp1, 0);
+		asm.jc_rel_far(X86_64Conds.Z, done);		// null continuation traps later
+		asm.q.cmp_m_i(r_tmp1.plus(offsets.NativeStack_range), 0);
+		asm.jc_rel_far(X86_64Conds.NZ, done);		// already has a segment
+		masm.emit_get_curstack(xenv.tmp1);
+		callRuntime(refRuntimeCall(X86_64RT.runtime_MATERIALIZE_CONT), [r_tmp1], true);
+		restoreCallerIVars();
+		asm.bind(done);
 	}
 	// Parks the current stack, publishes the handler table, chains {contStack} under it and switches.
 	def genResumeChain(curStack: Reg, contStack: Reg, skip_tag: bool) {
