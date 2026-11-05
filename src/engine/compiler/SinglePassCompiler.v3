@@ -184,6 +184,7 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 		if (!FeatureDisable.frameVariables && func.frame_var_tags != null) {
 			for (t in func.frame_var_tags) state.push(tagToKindFlags(t) | IS_CONST, NO_REG, 0);
 		}
+		pushEndProbeBlock();
 
 		// Emit function entry probe, if any.
 		if (!FeatureDisable.entryProbes && func.entry_probed) {
@@ -743,6 +744,14 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 		masm.emit_call_runtime_op(Opcode.THROW_REF);
 		setUnreachable();
 	}
+	// Pushes a block around the function body if the function has a probe at its final end.
+	// The block keeps the results above the locals when that probe fires.
+	def pushEndProbeBlock() {
+		def end_pc = func.cur_bytecode.length - 1;
+		if (Instrumentation.getLocalProbe(module, func.func_index, end_pc) != null) {
+			state.pushBlock(ValueTypes.NONE, sig.results, masm.newLabel(func.cur_bytecode.length));
+		}
+	}
 	def visit_END() {
 		var ctl_top = state.ctl_stack.peek();
 		if (ctl_top.opcode == Opcode.LOOP.code) {
@@ -774,6 +783,8 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 			return;
 		}
 		emitProbe();
+		// The final end closes the block from {pushEndProbeBlock}, then the function body.
+		if (it.pc == func.cur_bytecode.length - 1) visit_END();
 	}
 	def visit_BR(depth: u31) {
 		var target = state.getControl(depth);
@@ -881,6 +892,7 @@ class SinglePassCompiler(xenv: SpcExecEnv, masm: MacroAssembler, regAlloc: RegAl
 
 		// Allocate callee's non-parameter locals
 		it.dispatchLocalDecls(this);
+		pushEndProbeBlock();
 
 		// Emit function entry probe, if any.
 		if (whamm == null && !FeatureDisable.entryProbes && func.entry_probed) {
