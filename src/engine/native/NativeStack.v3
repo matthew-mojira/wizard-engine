@@ -41,6 +41,10 @@ class NativeStack extends WasmStack {
 		def frames = range.end - (rsp + Pointer.SIZE);
 		return u64.view(values + frames);
 	}
+	// Gets the number of value slots on this stack, as of its last saved stack pointers.
+	def numValues() -> int {
+		return int.!((vsp - range.start) / valuerep.slot_size);
+	}
 	// Requires {state == EMPTY}.
 	def reset0(func: Function, remaining_params: int) -> this {
 		checkState("reset()", StackState.EMPTY);

@@ -5,6 +5,7 @@
 def monitor_ = MonitorRegistry.add(
 	"ssevent", "Summarizes stack-switching instructions (suspend/switch/resume) and stack lifetimes.",
 	StackSwitchEventMonitor.new());
+def traceOpt = monitor_.options.newFlag("trace", null, "print a row for each stack-switching event instead of the summary");
 
 
 // Probes that are inserted in this monitor:
@@ -41,9 +42,15 @@ class StackSwitchEventMonitor extends Monitor {
 	var pending: StackSwitchSiteStats;	// stack switch currently in progress
 	var liveness_number: int; 		// lifetime number (tracking when stack created/destroyed)
 	var running: WasmStack; 		// the current stack as of the last stack switch, return or landing
+	var resumer: WasmStack;			// the stack that ran the last resume_throw or resume_throw_ref
+	var tracer: StackSwitchTracer;		// prints a row for each event, or null to print the summary
 
 	var module: Module;
 
+	def configure(args: string) -> string {
+		tracer = if(traceOpt.val, StackSwitchTracer.new(this));
+		return null;
+	}
 	def onParse(m: Module, err: ErrorGen) {
 		module = m;
 
@@ -56,6 +63,7 @@ class StackSwitchEventMonitor extends Monitor {
 		StackSwitchInstrumenter.new(this, m).run();
 	}
 	def onMain(f: Function, args: Array<Value>) {
+		if (tracer != null) tracer.printHeader();
 		def func_index = WasmFunction.!(f).decl.func_index;
 		StackLifetimeStats.new(this, func_index);
 	}
@@ -65,6 +73,8 @@ class StackSwitchEventMonitor extends Monitor {
 		def from = running;
 
 		running = cur; // change running stack
+
+		if (tracer != null) tracer.printSwitch(dynamicLoc, cur);
 
 		// source op
 		match (pending.op) {
@@ -77,8 +87,11 @@ class StackSwitchEventMonitor extends Monitor {
 			}
 			RESUME_THROW, RESUME_THROW_REF => {
 				// end the stacks that the exception unwound
-				for (s = from; s != null && s != cur; s = s.parent)
-					end(s, StackEnd.UNWOUND);
+				for (s = from; s != null && s != cur; s = s.parent) unwind(s, dynamicLoc, cur);
+				// the exception goes on from the continuation to the stack that resumed it
+				if (!inChain(from, cur)) {
+					for (s = resumer; s != null && s != cur; s = s.parent) unwind(s, dynamicLoc, cur);
+				}
 			}
 			_ => ;
 		}
@@ -104,6 +117,13 @@ class StackSwitchEventMonitor extends Monitor {
 		liveness_number++;
 		life.end(liveness_number, how);
 	}
+	// Ends the lifetime of a stack that an exception unwound to {dynamicLoc} on {cur}.
+	def unwind(stack: WasmStack, dynamicLoc: DynamicLoc, cur: WasmStack) {
+		def life = findLive(stack);
+		if (life == null) return;
+		endLife(life, StackEnd.UNWOUND);
+		if (tracer != null) tracer.printUnwind(life, dynamicLoc, cur);
+	}
 	// Returns true if {to} is {from} or an ancestor of {from}.
 	def inChain(from: WasmStack, to: WasmStack) -> bool {
 		var s = from;
@@ -114,9 +134,163 @@ class StackSwitchEventMonitor extends Monitor {
 	def onFinish(i: Instance, r: Result) {
 		// XXX assumes stacks[0] is the main stack
 		if (stacks[0].how == StackEnd.LIVE) endLife(stacks[0], StackEnd.RETURNED);
-		reportText(out, this);
+		if (tracer != null) tracer.printEnd();
+		else reportText(out, this);
 		running = null;
 	}
+}
+
+// Prints a row for each stack-switching event of {monitor} as the program runs.
+class StackSwitchTracer(monitor: StackSwitchEventMonitor) {
+	var header_printed: bool;	// the header has been printed
+	var rows: long;			// rows printed since the header
+	var from_bytes: u64;		// bytes on the current stack at the stack switch in progress
+	var from_values: int;		// value slots on the current stack at the stack switch in progress
+	var from_frames: int;		// frames on the current stack at the stack switch in progress
+	var from_chain: long;		// stacks from the current stack up through its parents at the stack switch in progress
+	var from_stack: long;		// number of the current stack at the stack switch in progress
+
+	// Prints the header, if it has not been printed.
+	def printHeader() {
+		if (header_printed) return;
+		header_printed = true;
+		def out = monitor.out;
+		if (MonitorOptions.CSV.val) traceTable.putCsvHeader(out);
+		else traceTable.putTableHeader(out);
+		out.flush();
+	}
+	// Returns the number of {stack}, or 0 for the main stack.
+	def stackNumber(stack: WasmStack) -> long {
+		def life = StackLifetimeStats.!(stack.monitor_data);
+		return if(life != null, life.number);
+	}
+	// Returns the number of stacks from {stack} up through its parents.
+	def chainLength(stack: WasmStack) -> long {
+		var n = 0L;
+		for (s = stack; s != null; s = s.parent) n++;
+		return n;
+	}
+	// Saves the measurements of {stack} at the start of a stack switch.
+	def saveFrom(stack: WasmStack, dynamicLoc: DynamicLoc) {
+		from_bytes = stack.usedBytes();
+		from_values = stack.numValues();
+		from_frames = dynamicLoc.frame.getFrameAccessor().depth() + 1;
+		from_chain = chainLength(stack);
+		from_stack = stackNumber(stack);
+	}
+	// Starts a row with its number and event.
+	def startRow(event: string) -> Array<TableCell> {
+		rows++;
+		def C = traceTable.cells;
+		C[0].putd(rows);
+		C[1].puts(event);
+		return C;
+	}
+	// Prints the row that was filled in and sends it to the output.
+	def finishRow() {
+		def out = monitor.out;
+		if (MonitorOptions.CSV.val) traceTable.putCsvRow(out);
+		else traceTable.putTableRow(out);
+		out.flush();
+	}
+	// Fills the destination measurements of a row from {dynamicLoc} on {cur}.
+	def fillTo(C: Array<TableCell>, dynamicLoc: DynamicLoc, cur: WasmStack) {
+		def accessor = dynamicLoc.frame.getFrameAccessor();
+		def bytes = cur.usedBytes();
+		def values = cur.numValues();
+		def frames = accessor.depth() + 1;
+		def number = stackNumber(cur);
+		C[6].putd(dynamicLoc.func.decl.func_index);
+		C[7].putd(dynamicLoc.pc);
+		C[13].putd(bytes);
+		C[14].putd(values);
+		C[15].putd(frames);
+		C[17].putd(number);
+	}
+	// Prints the row for the stack switch in progress landing at {dynamicLoc} on {cur}.
+	def printSwitch(dynamicLoc: DynamicLoc, cur: WasmStack) {
+		def C = startRow("switch");
+		def site = monitor.pending;
+		C[2].putd(site.func_index);
+		C[3].putd(site.pc);
+		C[4].puts(site.op.mnemonic);
+		if (site.tag >= 0) C[5].putd(site.tag);
+		C[8].putd(2 * monitor.stacks.length - monitor.liveness_number);
+		C[9].putd(from_bytes);
+		C[10].putd(from_values);
+		C[11].putd(from_frames);
+		C[12].putd(from_chain);
+		C[16].putd(from_stack);
+		fillTo(C, dynamicLoc, cur);
+		finishRow();
+	}
+	// Prints the row for {returned} returning to {dynamicLoc} on {cur}.
+	def printReturn(site_stats: StackSwitchSiteStats, returned: WasmStack, dynamicLoc: DynamicLoc, cur: WasmStack) {
+		def C = startRow("return");
+		C[2].putd(site_stats.func_index);
+		C[3].putd(site_stats.pc);
+		C[8].putd(2 * monitor.stacks.length - monitor.liveness_number);
+		def number = stackNumber(returned);
+		C[16].putd(number);
+		fillTo(C, dynamicLoc, cur);
+		finishRow();
+	}
+	// Prints the row for the stack of {life} being unwound to {dynamicLoc} on {cur}.
+	def printUnwind(life: StackLifetimeStats, dynamicLoc: DynamicLoc, cur: WasmStack) {
+		def C = startRow("unwind");
+		C[6].putd(dynamicLoc.func.decl.func_index);
+		C[7].putd(dynamicLoc.pc);
+		C[8].putd(2 * monitor.stacks.length - monitor.liveness_number);
+		C[16].putd(life.number);
+		def number = stackNumber(cur);
+		C[17].putd(number);
+		finishRow();
+	}
+	// Numbers the stack of {life} and prints its row, for the {cont.new} at {pc} in {func_index} running on {cur}.
+	def printCreate(life: StackLifetimeStats, func_index: int, pc: int, cur: WasmStack) {
+		life.number = monitor.stacks.length - 1;
+		def C = startRow("create");
+		C[2].putd(func_index);
+		C[3].putd(pc);
+		C[4].puts(Opcode.CONT_NEW.mnemonic);
+		C[8].putd(2 * monitor.stacks.length - monitor.liveness_number);
+		def number = stackNumber(cur);
+		C[16].putd(number);
+		finishRow();
+	}
+	// Prints the row for the end of the main stack.
+	def printEnd() {
+		def C = startRow("end");
+		C[8].putd(2 * monitor.stacks.length - monitor.liveness_number);
+		C[16].putd(0);
+		finishRow();
+	}
+}
+
+// Layout of the trace rows. Shared by the text and CSV renderers.
+def traceTable = initTraceTable();
+def initTraceTable() -> TraceTable {
+	def t = TraceTable.new(["#", "Event", "Function", "PC", "Opcode", "Tag", "ToFunction", "ToPC", "Live",
+		"Bytes", "Values", "Frames", "Chain", "ToBytes", "ToValues", "ToFrames", "Stack", "ToStack"]);
+	t.cells[0].set(8,  Justification.RIGHT, Color.COUNT);
+	t.cells[1].set(6,  Justification.LEFT,  Color.NONE);
+	t.cells[2].set(8,  Justification.RIGHT, Color.FUNC);
+	t.cells[3].set(6,  Justification.RIGHT, Color.LINE);
+	t.cells[4].set(16, Justification.LEFT,  Color.INSTR);
+	t.cells[5].set(4,  Justification.RIGHT, Color.TYPE);
+	t.cells[6].set(10, Justification.RIGHT, Color.FUNC);
+	t.cells[7].set(6,  Justification.RIGHT, Color.LINE);
+	t.cells[8].set(6,  Justification.RIGHT, Color.COUNT);
+	t.cells[9].set(8,  Justification.RIGHT, Color.COUNT);
+	t.cells[10].set(6, Justification.RIGHT, Color.COUNT);
+	t.cells[11].set(6, Justification.RIGHT, Color.COUNT);
+	t.cells[12].set(6, Justification.RIGHT, Color.COUNT);
+	t.cells[13].set(8, Justification.RIGHT, Color.COUNT);
+	t.cells[14].set(8, Justification.RIGHT, Color.COUNT);
+	t.cells[15].set(8, Justification.RIGHT, Color.COUNT);
+	t.cells[16].set(6, Justification.RIGHT, Color.NONE);
+	t.cells[17].set(7, Justification.RIGHT, Color.NONE);
+	return t;
 }
 
 // Places the following probes:
@@ -130,7 +304,6 @@ class StackSwitchInstrumenter extends BytecodeInstrumenter {
 	def monitor: StackSwitchEventMonitor;
 	def landing_probe = LandingProbe.new(monitor);
 	def catch_probe = CatchProbe.new(monitor);
-	def create_probe = CreateProbe.new(monitor);
 
 	new(monitor, module: Module) super(module) { }
 
@@ -214,7 +387,8 @@ class StackSwitchInstrumenter extends BytecodeInstrumenter {
 	def visit_CONT_NEW(cont: u31) {
 		count(Opcode.CONT_NEW, monitor.cont_new_count);
 		def next = bi.nextPc();
-		Instrumentation.insertLocalProbe(module, bi.func.func_index, next, create_probe);
+		def probe = CreateProbe.new(monitor, bi.func.func_index, bi.pc);
+		Instrumentation.insertLocalProbe(module, bi.func.func_index, next, probe);
 	}
 	def visit_CONT_BIND(in_cont: u31, out_cont: u31) { count(Opcode.CONT_BIND, monitor.cont_bind_count); }
 	def visit_SUSPEND(tag: u31) { addSite(Opcode.SUSPEND, int.view(tag)); }
@@ -243,6 +417,7 @@ class ReturnProbe(monitor: StackSwitchEventMonitor, site_stats: StackSwitchSiteS
 		monitor.end(returned, StackEnd.RETURNED);
 
 		site_stats.recordDest(dynamicLoc.func.decl.func_index, dynamicLoc.pc);
+		if (monitor.tracer != null) monitor.tracer.printReturn(site_stats, returned, dynamicLoc, cur);
 		return ProbeAction.Continue;
 	}
 }
@@ -258,11 +433,14 @@ class LandingProbe(monitor: StackSwitchEventMonitor) extends Probe {
 // Placed at each try_table catch handler.
 class CatchProbe(monitor: StackSwitchEventMonitor) extends Probe {
 	def fire(dynamicLoc: DynamicLoc) -> ProbeAction {
+		// skip if a stack switch is landing here
+		if (monitor.pending != null) return ProbeAction.Continue;
+
 		def cur = Target.curStack();
 		// check if control reaches here from exception (instead of return or stack switch)
 		if (monitor.inChain(monitor.running, cur)) {
 			// unwind all parent stacks
-			for (s = monitor.running; s != cur; s = s.parent) monitor.end(s, StackEnd.UNWOUND);
+			for (s = monitor.running; s != cur; s = s.parent) monitor.unwind(s, dynamicLoc, cur);
 			monitor.running = cur;
 		}
 
@@ -285,7 +463,10 @@ class StackSwitchProbe(monitor: StackSwitchEventMonitor, site_stats: StackSwitch
 			match (dynamicLoc.frame.getFrameAccessor().getTopOfStack()) {
 				Cont(c) => {
 					// running becomes the continuation's top stack, where the exception is raised
-					if (op == Opcode.RESUME_THROW || op == Opcode.RESUME_THROW_REF) monitor.running = c.stack;
+					if (op == Opcode.RESUME_THROW || op == Opcode.RESUME_THROW_REF) {
+						monitor.running = c.stack;
+						monitor.resumer = stack;
+					}
 					// count a resume for each stack of the continuation
 					for (s = c.stack; s != null; s = s.parent) {
 						def life = monitor.findLive(s);
@@ -296,6 +477,8 @@ class StackSwitchProbe(monitor: StackSwitchEventMonitor, site_stats: StackSwitch
 			}
 		}
 		// for other kinds of switch, get it from the landing probe (dynamically)
+
+		if (monitor.tracer != null) monitor.tracer.saveFrom(stack, dynamicLoc);
 
 		// update the max bytes and frames of the current stack
 		def life = monitor.findLive(stack);
@@ -313,7 +496,7 @@ class StackSwitchProbe(monitor: StackSwitchEventMonitor, site_stats: StackSwitch
 }
 
 // Placed after each {cont.new}.
-class CreateProbe(monitor: StackSwitchEventMonitor) extends Probe {
+class CreateProbe(monitor: StackSwitchEventMonitor, site_func_index: int, site_pc: int) extends Probe {
 	def fire(dynamicLoc: DynamicLoc) -> ProbeAction {
 		// get top of stack
 		match (dynamicLoc.frame.getFrameAccessor().getTopOfStack()) {
@@ -331,11 +514,19 @@ class CreateProbe(monitor: StackSwitchEventMonitor) extends Probe {
 				// XXX func_index from the defining module (does not support imported functions)
 				if (func_index >= 0) monitor.func_conts[func_index] += 1;
 
+				// the first {cont.new} runs on the main stack
+				if (monitor.stacks.length == 1) Target.curStack().monitor_data = monitor.stacks[0];
+
 				// start to track lifetime for this stack
 				def life = StackLifetimeStats.new(monitor, func_index);
 
 				// set up stack's monitor data
 				c.stack.monitor_data = life;
+
+				if (monitor.tracer != null) {
+					def cur = Target.curStack();
+					monitor.tracer.printCreate(life, site_func_index, site_pc, cur);
+				}
 			}
 			_ => ;
 		}
@@ -370,6 +561,7 @@ class StackLifetimeStats extends StackMonitorData {
 	var suspends: u64;		// times this stack was suspended
 	var max_bytes: u64;		// the most bytes of values and frames on this stack at the stack switches it executed
 	var max_frames: int;		// the most frames on this stack at the stack switches it executed
+	var number: long;		// number of this stack in the trace rows, or 0 for the main stack
 
 	new(monitor: StackSwitchEventMonitor, func_index) {
 		monitor.liveness_number++;
