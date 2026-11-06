@@ -23,7 +23,7 @@
   (func $main (param i32) (result i32)
     (resume $c1 (local.get 0) (cont.new $c1 (ref.func $foo)))
   )
-  ;; main is left unexported so wizeng's auto-entry picks _start, which drives main(128).
+  ;; main is left unexported so wizeng's auto-entry picks _start, which drives main(67).
   (func (export "_start")
     (drop (call $main (i32.const 67)))
   )
