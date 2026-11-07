@@ -12,6 +12,7 @@ def traceOpt = monitor_.options.newFlag("trace", null, "print a row for each sta
 // - StackSwitchProbe: at each switching instruction, tracks the start of stack switches
 // - LandingProbe: at each instruction where a stack switch might go, tracks the end of stack switches
 // - ReturnProbe: at each instruction AFTER resume, tracking child stacks that returned
+// - StackReturnProbe: at each return and final end of a function that can be the bottom frame of a stack, tracks where the stack returns
 // - CatchProbe: at each try_table catch handler, tracks exceptions that unwind the stack
 // - CreateProbe: at each cont.new, tracks the creation of each stack
 // - CountProbes: on cont.new and cont.bind that count executions of those instructions
@@ -302,16 +303,24 @@ def initTraceTable() -> TraceTable {
 // - CatchProbe: at each try_table catch handler
 // - ReturnProbe: after each resume-family instruction
 // - CreateProbe: after each cont.new
+// - StackReturnProbe: at each return and final end of a function that can be the bottom frame of a stack
 class StackSwitchInstrumenter extends BytecodeInstrumenter {
 	def monitor: StackSwitchEventMonitor;
 	def landing_probe = LandingProbe.new(monitor);
 	def catch_probe = CatchProbe.new(monitor);
+	def return_probe = ReturnProbe.new(monitor);
+	var return_probed: Array<bool>;	// functions that have StackReturnProbes
 
-	new(monitor, module: Module) super(module) { }
+	new(monitor, module: Module) super(module) {
+		return_probed = Array<bool>.new(module.functions.length);
+	}
 
 	def onFunc(func: FuncDecl) {
 		// install a LandingProbe if the function can be referenced as a value
 		if (func.reffed) Instrumentation.insertFuncEntryProbe(module, func.func_index, landing_probe);
+
+		// install StackReturnProbes if the function can start a stack
+		if (func.reffed) insertReturnProbes(func);
 
 		// insert a CatchProbe and a LandingProbe at each `try_table` catch handler
 		for (e in func.handlers.ex_handlers) {
@@ -337,6 +346,22 @@ class StackSwitchInstrumenter extends BytecodeInstrumenter {
 		}
 		Instrumentation.insertLocalProbe(module, func.func_index, pc, landing_probe);
 	}
+	// Inserts a StackReturnProbe, with its own return site, at each return and the final end of {func}.
+	def insertReturnProbes(func: FuncDecl) {
+		if (func.imp != null || return_probed[func.func_index]) return;
+		return_probed[func.func_index] = true;
+		for (it = BytecodeIterator.new().reset(func); it.more(); it.next()) {
+			match (it.current()) {
+				RETURN => ;
+				END => if (it.pc + 1 < func.cur_bytecode.length) continue;
+				_ => continue;
+			}
+			def site_stats = StackSwitchSiteStats.new(func.func_index, it.pc, Opcode.RETURN, -1);
+			monitor.stack_switch_sites.put(site_stats);
+			def probe = StackReturnProbe.new(monitor, site_stats);
+			Instrumentation.insertLocalProbe(module, func.func_index, it.pc, probe);
+		}
+	}
 
 	// for a suspend, switch, or resume instruction:
 	// - increments the static counts of its opcode and its function
@@ -356,11 +381,8 @@ class StackSwitchInstrumenter extends BytecodeInstrumenter {
 		addSite(op, tag);
 
 		// install a ReturnProbe at the next instruction
-		def site_stats = StackSwitchSiteStats.new(bi.func.func_index, bi.pc, Opcode.RETURN, -1);
-		monitor.stack_switch_sites.put(site_stats);
 		def next = bi.nextPc();
-		def probe = ReturnProbe.new(monitor, site_stats);
-		Instrumentation.insertLocalProbe(module, bi.func.func_index, next, probe);
+		Instrumentation.insertLocalProbe(module, bi.func.func_index, next, return_probe);
 
 		// record each handler clause installed by the resume site
 		for (h in handlers) {
@@ -398,11 +420,12 @@ class StackSwitchInstrumenter extends BytecodeInstrumenter {
 	def visit_RESUME(cont: u31, handlers: Range<SuspensionHandler>) { addResumeSite(Opcode.RESUME, -1, handlers); }
 	def visit_RESUME_THROW(cont: u31, tag: u31, handlers: Range<SuspensionHandler>) { addResumeSite(Opcode.RESUME_THROW, int.view(tag), handlers); }
 	def visit_RESUME_THROW_REF(cont: u31, handlers: Range<SuspensionHandler>) { addResumeSite(Opcode.RESUME_THROW_REF, -1, handlers); }
+	def visit_RETURN_CALL(func_index: u31) { insertReturnProbes(module.functions[func_index]); }
 }
 
 // placed at the instruction AFTER a resume, which is designed to catch stacks that terminate
 // with a normal return and not a suspension
-class ReturnProbe(monitor: StackSwitchEventMonitor, site_stats: StackSwitchSiteStats) extends Probe {
+class ReturnProbe(monitor: StackSwitchEventMonitor) extends Probe {
 	def fire(dynamicLoc: DynamicLoc) -> ProbeAction {
 		def cur = Target.curStack();
 
@@ -415,11 +438,25 @@ class ReturnProbe(monitor: StackSwitchEventMonitor, site_stats: StackSwitchSiteS
 		def returned = monitor.running;
 		monitor.running = cur;
 
+		// the site is where the bottom frame of the returned stack returned
+		def life = monitor.findLive(returned);
+		def site_stats = life.return_site;
 		site_stats.count++;
-		monitor.end(returned, StackEnd.RETURNED);
+		monitor.endLife(life, StackEnd.RETURNED);
 
 		site_stats.recordDest(dynamicLoc.func.decl.func_index, dynamicLoc.pc);
 		if (monitor.tracer != null) monitor.tracer.printReturn(site_stats, returned, dynamicLoc, cur);
+		return ProbeAction.Continue;
+	}
+}
+
+// Placed at each return and final end of a function that can be the bottom frame of a stack.
+class StackReturnProbe(monitor: StackSwitchEventMonitor, site_stats: StackSwitchSiteStats) extends Probe {
+	def fire(dynamicLoc: DynamicLoc) -> ProbeAction {
+		// records this site on the lifetime stats of the current stack
+		def stack = Target.curStack();
+		def life = monitor.findLive(stack);
+		if (life != null) life.return_site = site_stats;
 		return ProbeAction.Continue;
 	}
 }
@@ -564,6 +601,7 @@ class StackLifetimeStats extends StackMonitorData {
 	var max_bytes: u64;		// the most bytes of values and frames on this stack at the stack switches it executed
 	var max_frames: int;		// the most frames on this stack at the stack switches it executed
 	var number: long;		// number of this stack in the trace rows and the stack lifetimes
+	var return_site: StackSwitchSiteStats;	// the return or end where the bottom frame of this stack last started to return
 
 	new(monitor: StackSwitchEventMonitor, func_index) {
 		monitor.liveness_number++;
