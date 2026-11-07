@@ -13,12 +13,12 @@ ssevent: tag usage
 
 ssevent: functions involved in stack switching
 4 involved, 1 not involved, of 5 functions
-   Function  Instrs  Continuations
------------------------------------
-     "once"       1              4
-   "throws"       0              1
-    "outer"       2              1
-         #4      13              0
+   Function  Instrs  Continuations Suspend Switch  Catch
+---------------------------------------------------------
+     "once"       1              4       0      0      0
+   "throws"       0              1       0      0      0
+    "outer"       2              1       0      0      1
+         #4      13              0       3      0      2
 
 ssevent: stack switch destinations
 func 1 +1 suspend tag 1 x 3 -> 3 destinations

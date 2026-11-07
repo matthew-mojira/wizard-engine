@@ -6,10 +6,10 @@ ssevent: stack-switching instruction counts
 
 ssevent: functions involved in stack switching
 2 involved, 1 not involved, of 3 functions
-   Function  Instrs  Continuations
------------------------------------
-         #0       2             68
-         #1       2              0
+   Function  Instrs  Continuations Suspend Switch  Catch
+---------------------------------------------------------
+         #0       2             68       0      0      0
+         #1       2              0       0      0      0
 
 ssevent: stack switch destinations
 func 0 +20 resume x 67 -> 1 destination

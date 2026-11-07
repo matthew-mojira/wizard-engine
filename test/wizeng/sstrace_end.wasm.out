@@ -14,10 +14,10 @@ resume,2,2
 Tag,Params,Sites,Count,Suspend,Switch
 0,0,1,1,1,0
 
-Function,Instrs,Continuations
-0,1,1
-1,1,0
-2,2,0
+Function,Instrs,Continuations,Suspend,Switch,Catch
+0,1,1,0,0,0
+1,1,0,0,0,0
+2,2,0,1,0,0
 
 Function,PC,Opcode,Tag,Count,ToFunction,ToPC,ToCount,Fraction
 0,3,suspend,0,1,2,19,1,1.0000

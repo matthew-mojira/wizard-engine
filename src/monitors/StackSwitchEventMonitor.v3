@@ -669,10 +669,13 @@ def reportTags(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
 
 def funcTable = initFuncTable();
 def initFuncTable() -> TraceTable {
-	var t = TraceTable.new(["Function", "Instrs", "Continuations"]);
+	var t = TraceTable.new(["Function", "Instrs", "Continuations", "Suspend", "Switch", "Catch"]);
 	t.cells[0].set(10, Justification.RIGHT, Color.FUNC);
 	t.cells[1].set(7,  Justification.RIGHT, Color.INACTIVE);	// static
 	t.cells[2].set(14, Justification.RIGHT, Color.COUNT);		// dynamic
+	t.cells[3].set(7,  Justification.RIGHT, Color.INACTIVE);	// static: on clauses
+	t.cells[4].set(6,  Justification.RIGHT, Color.INACTIVE);	// static: on-switch clauses
+	t.cells[5].set(6,  Justification.RIGHT, Color.INACTIVE);	// static: try_table catch clauses
 	return t;
 }
 
@@ -710,6 +713,10 @@ def reportFuncs(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
 		else m.functions[i].render(m.names, C[0]);
 		C[1].putd(monitor.func_instrs[i]);
 		C[2].putd(monitor.func_conts[i]);
+		def handlers = m.functions[i].handlers;
+		C[3].putd(handlers.suspend_handlers.length);
+		C[4].putd(handlers.switch_handlers.length);
+		C[5].putd(handlers.ex_handlers.length);
 		if (MonitorOptions.CSV.val) funcTable.putCsvRow(out);
 		else funcTable.putTableRow(out);
 	}

@@ -209,9 +209,9 @@ Opcode,Static,Dynamic
 cont.new,2,68
 resume,2,68
 
-Function,Instrs,Continuations
-0,2,68
-1,2,0
+Function,Instrs,Continuations,Suspend,Switch,Catch
+0,2,68,0,0,0
+1,2,0,0,0,0
 
 Function,PC,Opcode,Tag,Count,ToFunction,ToPC,ToCount,Fraction
 0,20,resume,,67,0,0,67,1.0000

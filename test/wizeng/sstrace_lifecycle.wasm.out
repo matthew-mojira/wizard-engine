@@ -30,11 +30,11 @@ resume_throw,2,2
 Tag,Params,Sites,Count,Suspend,Switch
 1,0,1,3,3,0
 
-Function,Instrs,Continuations
-0,1,4
-1,0,1
-2,2,1
-3,11,0
+Function,Instrs,Continuations,Suspend,Switch,Catch
+0,1,4,0,0,0
+1,0,1,0,0,0
+2,2,1,0,0,1
+3,11,0,3,0,2
 
 Function,PC,Opcode,Tag,Count,ToFunction,ToPC,ToCount,Fraction
 0,1,suspend,1,3,3,35,1,0.3333
