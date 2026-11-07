@@ -161,7 +161,7 @@ if [[ "$TARGET" =~ x86 ]]; then
 	append_comma_sep REDEFS "RiGc.debug=true"
     fi
     if [ "$GC_STATS" = 1 ]; then
-	append_comma_sep REDEFS "RiGc.stats=true"
+	append_comma_sep REDEFS "GcStats.enabled=true"
 	append_comma_sep REDEFS "RiGc.verbose=true"
     fi
     if [ "$NO_JIT" = 1 ]; then
@@ -247,7 +247,8 @@ case "$TARGET" in
     x86-64-linux|x86_64_linux)
 	TARGET_SRC="$TARGET_X86_64 $OBJECT_MODEL_JIT_SRC"
 	if [ "$CBD" = true ]; then TARGET_SRC="$TARGET_CBD_FAST $TARGET_SRC"; fi
-	exec v3c-x86-64-linux -symbols -heap-size=1700m -stack-size=2m $LANG_OPTS $V3C_OPTS -program-name=${PROGRAM}.${TARGET} -output=bin/ $SOURCES $BUILD_FILE $TARGET_SRC
+	# Not exec: the pregen step below must run after compilation.
+	v3c-x86-64-linux -symbols -heap-size=1700m -stack-size=2m $LANG_OPTS $V3C_OPTS -program-name=${PROGRAM}.${TARGET} -output=bin/ $SOURCES $BUILD_FILE $TARGET_SRC
 	STATUS=$?
 	if [ $STATUS != 0 ]; then
 	    exit $STATUS
