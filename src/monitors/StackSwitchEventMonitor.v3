@@ -39,6 +39,7 @@ class StackSwitchEventMonitor extends Monitor {
 	def func_conts = Vector<u64>.new();		// how many continuations were created from each function
 	def func_instrs = Vector<u64>.new();		// how many stack-switching instructions in each function
 	def stacks = Vector<StackLifetimeStats>.new();	// every stack in the program (in creation order)
+	def compression_events = Vector<CompressionEvent>.new();	// every stack compression and decompression (in order)
 
 	var pending: StackSwitchSiteStats;	// stack switch currently in progress
 	var liveness_number: int; 		// lifetime number (tracking when stack created/destroyed)
@@ -62,6 +63,11 @@ class StackSwitchEventMonitor extends Monitor {
 		func_instrs.grow(m.functions.length);
 
 		StackSwitchInstrumenter.new(this, m).run();
+		StackCompression.onCompress = onCompressionEvent(CompressionEventType.COMPRESS, _, _, _);
+		StackCompression.onDecompress = onCompressionEvent(CompressionEventType.DECOMPRESS, _, _, _);
+	}
+	def onCompressionEvent(kind: CompressionEventType, decompressed: u64, c: CompressedStack, cycles: u64) {
+		compression_events.put(CompressionEvent(kind, decompressed, c.size(), cycles));
 	}
 	def onMain(f: Function, args: Array<Value>) {
 		if (tracer != null) tracer.printHeader();
@@ -159,8 +165,7 @@ class StackSwitchTracer(monitor: StackSwitchEventMonitor) {
 		if (header_printed) return;
 		header_printed = true;
 		def out = monitor.out;
-		if (MonitorOptions.CSV.val) traceTable.putCsvHeader(out);
-		else traceTable.putTableHeader(out);
+		putHeader(out, traceTable);
 		out.flush();
 	}
 	// Returns the number of {stack}, or 0 if it has no lifetime stats.
@@ -193,8 +198,7 @@ class StackSwitchTracer(monitor: StackSwitchEventMonitor) {
 	// Prints the row that was filled in and sends it to the output.
 	def finishRow() {
 		def out = monitor.out;
-		if (MonitorOptions.CSV.val) traceTable.putCsvRow(out);
-		else traceTable.putTableRow(out);
+		putRow(out, traceTable);
 		out.flush();
 	}
 	// Fills the destination measurements of a row from {dynamicLoc} on {cur}.
@@ -621,18 +625,27 @@ enum StackEnd {
 	UNWOUND
 }
 
+enum CompressionEventType {
+	COMPRESS,
+	DECOMPRESS
+}
+
+// A stack compression or decompression, with both sizes in bytes and the time it took in cycles.
+type CompressionEvent(kind: CompressionEventType, decompressed: u64, compressed: u64, cycles: u64) #unboxed { }
+
 def reportText(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
-	if (!MonitorOptions.CSV.val) out.beginColor(Color.UNDERLINE).puts("ssevent: stack-switching instruction counts").endColors().ln();
+	out.beginColor(Color.UNDERLINE).puts("ssevent: stack-switching instruction counts").endColors().ln();
 	reportCounts(out, monitor);
 	reportTags(out, monitor);
 	reportFuncs(out, monitor);
 	reportDests(out, monitor);
 	reportStacks(out, monitor);
+	reportCompressions(out, monitor);
 }
 
 def countTable = initCountTable();
 def initCountTable() -> TraceTable {
-	var t = TraceTable.new(["Opcode", "Static", "Dynamic"]);
+	var t = TraceTable.new(["Opcode", "static", "dynamic"]);
 	t.cells[0].set(18, Justification.LEFT,  Color.INSTR);
 	t.cells[1].set(8,  Justification.RIGHT, Color.INACTIVE);	// static
 	t.cells[2].set(12, Justification.RIGHT, Color.COUNT);		// dynamic
@@ -648,15 +661,13 @@ def dynamicCount(monitor: StackSwitchEventMonitor, op: Opcode) -> u64 {
 }
 
 def reportCounts(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
-	if (MonitorOptions.CSV.val) countTable.putCsvHeader(out);
-	else countTable.putTableHeader(out);
+	putHeader(out, countTable);
 	for (op in STACK_SWITCHING_OPCODES) {
 		if (monitor.static_count[op.tag] == 0) continue;
 		countTable.cells[0].puts(op.mnemonic);
 		countTable.cells[1].putd(monitor.static_count[op.tag]);
 		countTable.cells[2].putd(dynamicCount(monitor, op));
-		if (MonitorOptions.CSV.val) countTable.putCsvRow(out);
-		else countTable.putTableRow(out);
+		putRow(out, countTable);
 	}
 	out.flush();
 }
@@ -685,10 +696,8 @@ def reportTags(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
 		counts[s.tag] += s.count;
 		sites[s.tag]++;
 	}
-	out.ln();
-	if (!MonitorOptions.CSV.val) out.beginColor(Color.UNDERLINE).puts("ssevent: tag usage").endColors().ln();
-	if (MonitorOptions.CSV.val) tagTable.putCsvHeader(out);
-	else tagTable.putTableHeader(out);
+	out.ln().beginColor(Color.UNDERLINE).puts("ssevent: tag usage").endColors().ln();
+	putHeader(out, tagTable);
 	for (tag < counts.length) {
 		def suspends = monitor.suspend_clauses[tag];
 		def switches = monitor.switch_clauses[tag];
@@ -699,8 +708,7 @@ def reportTags(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
 		tagTable.cells[3].putd(counts[tag]);
 		tagTable.cells[4].putd(suspends);
 		tagTable.cells[5].putd(switches);
-		if (MonitorOptions.CSV.val) tagTable.putCsvRow(out);
-		else tagTable.putTableRow(out);
+		putRow(out, tagTable);
 	}
 	out.flush();
 }
@@ -730,12 +738,9 @@ def reportFuncs(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
 	}
 	if (involved == 0) return;
 	var C = funcTable.cells;
-	out.ln();
-	if (!MonitorOptions.CSV.val) {
-		out.beginColor(Color.UNDERLINE).puts("ssevent: functions involved in stack switching").endColors().ln();
-		out.putd(involved).puts(" involved, ").putd(m.functions.length - involved).puts(" not involved, of ")
-			.putd(m.functions.length).puts(" functions").ln();
-	}
+	out.ln().beginColor(Color.UNDERLINE).puts("ssevent: functions involved in stack switching").endColors().ln();
+	out.putd(involved).puts(" involved, ").putd(m.functions.length - involved).puts(" not involved, of ")
+		.putd(m.functions.length).puts(" functions").ln();
 	var maxlen = int.!(C[0].width);
 	for (i < m.functions.length) { // compute maximum function name length for formatting
 		if (!isInvolved(monitor, i)) continue;
@@ -743,20 +748,17 @@ def reportFuncs(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
 		if (sb.length > maxlen) maxlen = sb.length;
 	}
 	C[0].width = if(maxlen > byte.max, byte.max, byte.view(maxlen));
-	if (MonitorOptions.CSV.val) funcTable.putCsvHeader(out);
-	else funcTable.putTableHeader(out);
+	putHeader(out, funcTable);
 	for (i < m.functions.length) {
 		if (!isInvolved(monitor, i)) continue;
-		if (MonitorOptions.CSV.val) C[0].putd(i);
-		else m.functions[i].render(m.names, C[0]);
+		m.functions[i].render(m.names, C[0]);
 		C[1].putd(monitor.func_instrs[i]);
 		C[2].putd(monitor.func_conts[i]);
 		def handlers = m.functions[i].handlers;
 		C[3].putd(handlers.suspend_handlers.length);
 		C[4].putd(handlers.switch_handlers.length);
 		C[5].putd(handlers.ex_handlers.length);
-		if (MonitorOptions.CSV.val) funcTable.putCsvRow(out);
-		else funcTable.putTableRow(out);
+		putRow(out, funcTable);
 	}
 	out.flush();
 }
@@ -772,7 +774,6 @@ def initDestTable() -> TraceTable {
 }
 
 def reportDests(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
-	if (MonitorOptions.CSV.val) return reportDestsCsv(out, monitor);
 	var any = false;
 	for (i < monitor.stack_switch_sites.length) {
 		var s = monitor.stack_switch_sites[i];
@@ -785,48 +786,17 @@ def reportDests(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
 		if (s.tag >= 0) out.puts(" tag ").putd(s.tag);
 		out.puts(" x ").putd(s.count).puts(" -> ").putd(s.dests.length).puts(if(s.dests.length == 1, " destination", " destinations")).ln();
 		if (s.dests.length == 0) continue;
-		destTable.putTableHeader(out);
+		putHeader(out, destTable);
 		for (j < s.dests.length) {
 			var d = s.dests[j];
 			destTable.cells[0].putd(d.0);
 			destTable.cells[1].putd(d.1);
 			destTable.cells[2].putd(d.2);
 			TraceUtil.renderPercent(destTable.cells[3], long.view(d.2), long.view(s.count), 2);
-			destTable.putTableRow(out);
+			putRow(out, destTable);
 		}
 		out.flush();
 	}
-}
-
-def destCsvTable = TraceTable.new(["Function", "PC", "Opcode", "Tag", "Count", "ToFunction", "ToPC", "ToCount", "Fraction"]);
-
-// Prints one CSV row for each destination of each stack switch site.
-def reportDestsCsv(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
-	def C = destCsvTable.cells;
-	var any = false;
-	for (i < monitor.stack_switch_sites.length) {
-		def s = monitor.stack_switch_sites[i];
-		if (s.count == 0) continue;
-		if (!any) {
-			out.ln();
-			destCsvTable.putCsvHeader(out);
-			any = true;
-		}
-		for (j < s.dests.length) {
-			def d = s.dests[j];
-			C[0].putd(s.func_index);
-			C[1].putd(s.pc);
-			C[2].puts(s.op.mnemonic);
-			if (s.tag >= 0) C[3].putd(s.tag);
-			C[4].putd(s.count);
-			C[5].putd(d.0);
-			C[6].putd(d.1);
-			C[7].putd(d.2);
-			TraceUtil.renderFraction(C[8], long.view(d.2), long.view(s.count), 4);
-			destCsvTable.putCsvRow(out);
-		}
-	}
-	out.flush();
 }
 
 def lifeTable = initLifeTable();
@@ -847,10 +817,8 @@ def initLifeTable() -> TraceTable {
 
 def reportStacks(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
 	if (monitor.stacks.length == 0) return;
-	out.ln();
-	if (!MonitorOptions.CSV.val) out.beginColor(Color.UNDERLINE).puts("ssevent: stack lifetimes").endColors().ln();
-	if (MonitorOptions.CSV.val) lifeTable.putCsvHeader(out);
-	else lifeTable.putTableHeader(out);
+	out.ln().beginColor(Color.UNDERLINE).puts("ssevent: stack lifetimes").endColors().ln();
+	putHeader(out, lifeTable);
 	def C = lifeTable.cells;
 	for (i < monitor.stacks.length) {
 		def life = monitor.stacks[i];
@@ -863,8 +831,48 @@ def reportStacks(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
 		C[6].putd(life.suspends);
 		C[7].putd(life.max_bytes);
 		C[8].putd(life.max_frames);
-		if (MonitorOptions.CSV.val) lifeTable.putCsvRow(out);
-		else lifeTable.putTableRow(out);
+		putRow(out, lifeTable);
 	}
 	out.flush();
+}
+
+def compressTable = initCompressTable();
+def initCompressTable() -> TraceTable {
+	def t = TraceTable.new(["#", "Event", "Decompressed", "Compressed", "Percent", "Cycles"]);
+	t.cells[0].set(6,  Justification.RIGHT, Color.NONE);
+	t.cells[1].set(10, Justification.LEFT,  Color.NONE);
+	t.cells[2].set(12, Justification.RIGHT, Color.COUNT);
+	t.cells[3].set(10, Justification.RIGHT, Color.COUNT);
+	t.cells[4].set(10, Justification.RIGHT, Color.COUNT);
+	t.cells[5].set(10, Justification.RIGHT, Color.COUNT);
+	return t;
+}
+
+def reportCompressions(out: TraceBuilder, monitor: StackSwitchEventMonitor) {
+	if (monitor.compression_events.length == 0) return;
+	out.ln().beginColor(Color.UNDERLINE).puts("ssevent: stack compression events").endColors().ln();
+	putHeader(out, compressTable);
+	def C = compressTable.cells;
+	for (i < monitor.compression_events.length) {
+		def e = monitor.compression_events[i];
+		C[0].putd(i + 1);
+		C[1].puts(e.kind.name);
+		C[2].putd(e.decompressed);
+		C[3].putd(e.compressed);
+		TraceUtil.renderPercent(C[4], long.view(e.compressed), long.view(e.decompressed), 2);
+		C[5].putd(e.cycles);
+		putRow(out, compressTable);
+	}
+	out.flush();
+}
+
+// Output a table header, either as a formatted table or comma-separated values.
+def putHeader(out: TraceBuilder, t: TraceTable) {
+	if (MonitorOptions.CSV.val) t.putCsvHeader(out);
+	else t.putTableHeader(out);
+}
+// Output a table row, either as a formatted table or comma-separated values.
+def putRow(out: TraceBuilder, t: TraceTable) {
+	if (MonitorOptions.CSV.val) t.putCsvRow(out);
+	else t.putTableRow(out);
 }
